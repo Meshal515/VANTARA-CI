@@ -51,12 +51,31 @@ export function sqliteEnv(overrides: Partial<Env> = {}): { env: Env; db: Databas
       async batch(statements: D1PreparedStatement[]) {
         db.exec('BEGIN');
         try {
+          const results = [];
           for (const raw of statements) {
             const statement = raw as SqliteStatement;
-            db.prepare(statement.sql).run(...(statement.values as SqliteValue[]));
+            const prepared = db.prepare(statement.sql);
+            // D1 batch returns one result object per statement. SELECTs must
+            // preserve their rows; otherwise sync integration tests exercise a
+            // fake database that can never return delta data.
+            const isReader = /^\s*(?:SELECT|PRAGMA|EXPLAIN)\b/i.test(statement.sql);
+            if (isReader) {
+              results.push({
+                results: prepared.all(...(statement.values as SqliteValue[])),
+                success: true,
+                meta: {},
+              });
+            } else {
+              const outcome = prepared.run(...(statement.values as SqliteValue[]));
+              results.push({
+                results: [],
+                success: true,
+                meta: { changes: outcome.changes },
+              });
+            }
           }
           db.exec('COMMIT');
-          return [];
+          return results;
         } catch (error) {
           db.exec('ROLLBACK');
           throw error;
