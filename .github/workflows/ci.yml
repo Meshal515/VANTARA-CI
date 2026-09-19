@@ -121,6 +121,28 @@ jobs:
           set -euo pipefail
           curl -fsS -X POST http://127.0.0.1:8080/api/setup             -H 'Content-Type: application/json'             --data '{"username":"mishal","password":"ci-only-password-1234567890123456","displayName":"CI Admin"}'
 
+      - name: Probe Uchiyomi token self-revocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          login_json="$(curl -fsS -X POST http://127.0.0.1:8080/auth/login             -H 'Content-Type: application/json'             --data '{"username":"mishal","password":"ci-only-password-1234567890123456"}')"
+          session_token="$(printf '%s' "$login_json" | jq -er '.accessToken')"
+
+          minted_json="$(curl -fsS -X POST http://127.0.0.1:8080/api/tokens             -H "Authorization: Bearer $session_token"             -H 'Content-Type: application/json'             --data '{"name":"vantara-self-revoke-probe","scopes":["read","write"],"expiresInDays":1}')"
+          token_id="$(printf '%s' "$minted_json" | jq -er '.id')"
+          token="$(printf '%s' "$minted_json" | jq -er '.token')"
+
+          curl -fsS http://127.0.0.1:8080/auth/me             -H "Authorization: Bearer $token" >/dev/null
+
+          revoke_status="$(curl -sS -o /tmp/revoke-body -w '%{http_code}'             -X DELETE "http://127.0.0.1:8080/api/tokens/$token_id"             -H "Authorization: Bearer $token")"
+          case "$revoke_status" in
+            2*) ;;
+            *) cat /tmp/revoke-body; echo "self-revoke returned HTTP $revoke_status"; exit 1 ;;
+          esac
+
+          after_status="$(curl -sS -o /tmp/after-revoke -w '%{http_code}'             http://127.0.0.1:8080/auth/me             -H "Authorization: Bearer $token")"
+          test "$after_status" = '401'
+
       - name: Apply VANTARA Postgres migrations
         env:
           DATABASE_URL: postgres://vantara:vantara-ci-password@127.0.0.1:5433/vantara
