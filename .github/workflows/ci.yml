@@ -78,6 +78,9 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Public backend safety gate
+        run: node --test tools/backend-public-safety.test.mjs
+
       - name: Clean database bootstrap + backup/restore
         run: sh infra/test-db-bootstrap.sh
 
