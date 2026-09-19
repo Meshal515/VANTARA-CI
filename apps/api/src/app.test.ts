@@ -21,6 +21,7 @@ const UCHIYOMI_URL = process.env['UCHIYOMI_URL'] ?? 'http://127.0.0.1:8080';
 const USERNAME = process.env['TEST_USERNAME'] ?? 'mishal';
 // لا كلمة مرور افتراضية في الكود: أي قيمة هنا تصبح سرًّا منشورًا في المستودع
 const PASSWORD = process.env['TEST_PASSWORD'];
+const REQUIRE_LIVE_INTEGRATION = process.env['VANTARA_REQUIRE_LIVE_INTEGRATION'] === 'true';
 
 let app: FastifyInstance;
 let cookie = '';
@@ -31,6 +32,7 @@ let skipReason = '';
 beforeAll(async () => {
   if (!PASSWORD) {
     skipReason = 'TEST_PASSWORD is not set';
+    if (REQUIRE_LIVE_INTEGRATION) throw new Error(`live integration required: ${skipReason}`);
     return;
   }
   initPool({ connectionString: DATABASE_URL });
@@ -40,16 +42,23 @@ beforeAll(async () => {
       signal: AbortSignal.timeout(4_000),
     });
     ready = probe.ok;
-  } catch {
+  } catch (error) {
     ready = false;
+    skipReason = error instanceof Error ? error.message : String(error);
   }
-  if (!ready) return;
+  if (!ready) {
+    if (REQUIRE_LIVE_INTEGRATION) {
+      throw new Error(`live integration required: dependencies unavailable (${skipReason || 'unknown error'})`);
+    }
+    return;
+  }
 
   const config = loadConfig({
     NODE_ENV: 'test',
     DATABASE_URL,
     UCHIYOMI_URL,
     SESSION_SECRET: 'test-secret-that-is-at-least-32-chars-long',
+    VANTARA_IDENTITY_SECRET: 'test-identity-secret-that-is-at-least-32-chars',
     COOKIE_SECURE: 'false',
     LOG_LEVEL: 'error',
   });
@@ -76,6 +85,10 @@ beforeAll(async () => {
     }
     skipReason = 'upstream rate-limited /auth/login';
     await new Promise((resolve) => setTimeout(resolve, 5_000 * (attempt + 1)));
+  }
+
+  if (cookie === '' && REQUIRE_LIVE_INTEGRATION) {
+    throw new Error(`live integration required: no authenticated session (${skipReason || 'login failed'})`);
   }
 }, 60_000);
 
