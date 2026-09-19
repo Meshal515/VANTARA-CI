@@ -67,6 +67,31 @@ describe('B1 clean-install invariants', () => {
     expect(compose).toContain('api_uploads:/source/api-uploads:ro');
   });
 
+  it('physically retires the old PostgreSQL social owner after the D1 ownership freeze', async () => {
+    const sessions = await text('apps/api/src/lib/sessions.ts');
+    const auth = await text('apps/api/src/routes/auth.ts');
+    const migration = await text('packages/db/migrations/0006_drop_retired_social.sql');
+
+    // B4 says D1 is the sole owner. Keeping live reads/writes here recreates a
+    // second owner even if every HTTP social route has been retired.
+    expect(sessions).not.toContain('vantara_profiles');
+    expect(sessions).not.toContain('vantara_user_gates');
+    expect(auth).not.toContain('vantara_profiles');
+
+    for (const table of [
+      'vantara_comment_reactions',
+      'vantara_comments',
+      'vantara_recommendations',
+      'vantara_activity_events',
+      'vantara_reading_sessions',
+      'vantara_presence',
+      'vantara_profiles',
+      'vantara_user_gates',
+    ]) {
+      expect(migration).toMatch(new RegExp(`DROP TABLE(?: IF EXISTS)? ${table}\\b`, 'i'));
+    }
+  });
+
   it('backs up PostgreSQL logically instead of snapshotting its live data directory', async () => {
     const compose = await text('infra/docker-compose.yml');
     const backup = await text('infra/backup-postgres.sh');
