@@ -1,0 +1,7 @@
+# VANTARA optional inpainting environment.
+# Keep this isolated from the core translation worker.
+# IOPaint 1.6.0 hard-pins Pillow 9.5.0 and therefore cannot share the
+# Pillow 12.3.0 + manga-ocr environment used by the Arabic renderer/OCR.
+
+Pillow==9.5.0
+iopaint==1.6.0
