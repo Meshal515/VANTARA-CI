@@ -230,15 +230,19 @@ jobs:
         run: |
           set -euo pipefail
           compose='docker compose -f infra/docker-compose.yml -f infra/docker-compose.ci.yml'
-          pnpm --filter @vantara/api start >/tmp/vantara-restart-api.log 2>&1 &
+          node apps/api/dist/server.js >/tmp/vantara-restart-api.log 2>&1 &
           api_pid=$!
           cleanup_api() { kill "$api_pid" >/dev/null 2>&1 || true; }
           trap cleanup_api EXIT INT TERM
 
           wait_ready() {
             for attempt in $(seq 1 45); do
-              if kill -0 "$api_pid" >/dev/null 2>&1 \
-                && curl -fsS http://127.0.0.1:3101/healthz >/dev/null; then
+              if ! kill -0 "$api_pid" >/dev/null 2>&1; then
+                echo 'API process exited during dependency restart probe.'
+                cat /tmp/vantara-restart-api.log
+                return 1
+              fi
+              if curl -fsS http://127.0.0.1:3101/healthz >/dev/null; then
                 return 0
               fi
               sleep 1
