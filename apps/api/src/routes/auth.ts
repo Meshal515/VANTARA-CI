@@ -75,6 +75,11 @@ export async function authRoutes(app: FastifyInstance, ctx: AppContext): Promise
 
   app.post('/v1/auth/logout', { preHandler: requireSession(ctx) }, async (request, reply) => {
     const session = sessionOf(request);
+    if (session.identityId) {
+      // Bearer v2 يمثل جهازًا موثوقًا عند Sync Worker؛ Content API لا يملك
+      // سجل trusted_devices، فلا يحق له ادعاء أنه ألغى الجهاز.
+      return reply.code(409).send({ error: 'device_logout_required' });
+    }
     try {
       await ctx.sessions.logout(session);
     } catch (err) {
@@ -87,7 +92,12 @@ export async function authRoutes(app: FastifyInstance, ctx: AppContext): Promise
   });
 
   app.post('/v1/auth/logout-all', { preHandler: requireSession(ctx) }, async (request, reply) => {
-    const count = await ctx.sessions.revokeAllFor(sessionOf(request).userId);
+    const session = sessionOf(request);
+    if (session.identityId) {
+      // إلغاء كل الأجهزة يملكه Worker لأن trusted_devices في D1.
+      return reply.code(409).send({ error: 'device_logout_all_required' });
+    }
+    const count = await ctx.sessions.revokeAllFor(session.userId);
     void reply.clearCookie(SESSION_COOKIE, { path: '/' });
     return reply.send({ revoked: count });
   });
