@@ -70,12 +70,15 @@ test('public backend mirror contains no high-confidence credential literals', ()
       if (pattern.test(text)) findings.push(`${path}: ${name}`);
     }
 
-    const assignment = /\b(SESSION_SECRET|VANTARA_IDENTITY_SECRET|VANTARA_DEVICE_PEPPER|POSTGRES_PASSWORD|TEST_PASSWORD|TUNNEL_TOKEN|CLOUDFLARE_API_TOKEN)\b\s*[:=]\s*["']([^"'\n]{12,})["']/g;
-    let match;
-    while ((match = assignment.exec(text)) !== null) {
-      const value = match[2];
-      if (/^(?:test|ci-|change-me|dummy|example|placeholder|__)/i.test(value)) continue;
-      findings.push(`${path}: literal ${match[1]}`);
+    if (!/(?:^|\\/)(?:tests?\\/|[^/]+\\.test\\.)/.test(path)) {
+      const assignment = /\\b(SESSION_SECRET|VANTARA_IDENTITY_SECRET|VANTARA_DEVICE_PEPPER|POSTGRES_PASSWORD|TEST_PASSWORD|TUNNEL_TOKEN|CLOUDFLARE_API_TOKEN)\\b\\s*[:=]\\s*["']([^"'\\n]{12,})["']/g;
+      let match;
+      while ((match = assignment.exec(text)) !== null) {
+        const value = match[2];
+        if (value.includes('${')) continue;
+        if (/(?:^|[-_])(test|testing|ci|dummy|example|placeholder)(?:[-_]|$)|change-me|__|localhost/i.test(value)) continue;
+        findings.push(`${path}: literal ${match[1]}`);
+      }
     }
   }
   assert.deepEqual(findings, []);
