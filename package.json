@@ -1,0 +1,35 @@
+{
+  "name": "vantara",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test && pnpm test:web",
+    "test:safety": "node --test tools/repository-safety.test.mjs",
+    "lint": "pnpm -r --if-present lint",
+    "migrate": "pnpm --filter @vantara/db migrate",
+    "dev": "pnpm --filter @vantara/api dev",
+    "test:web": "vitest run apps/web"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.2",
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.2",
+    "@capacitor/app": "^6.0.2",
+    "@capacitor/core": "^6.2.2"
+  }
+}
