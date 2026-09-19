@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { query, queryOne } from '@vantara/db';
 import { containsSecret, isCorrelationId, ownerOf, scrubDiagnostics } from '@vantara/domain';
-import { requireSession, sessionOf, type AppContext } from '../lib/context.ts';
+import { requireAdmin, requireSession, sessionOf, type AppContext } from '../lib/context.ts';
 
 const KINDS = [
   'CHAPTER_WONT_OPEN',
@@ -250,7 +250,10 @@ export async function reportRoutes(app: FastifyInstance, ctx: AppContext): Promi
     return reply.code(201).send({ seriesRef: input.seriesRef, snapshot });
   });
 
-  app.get('/v1/deleted-works', { preHandler: requireSession(ctx) }, async (_request, reply) => {
+  app.get(
+    '/v1/deleted-works',
+    { preHandler: [requireSession(ctx), requireAdmin(ctx)] },
+    async (_request, reply) => {
     const rows = await query(
       `SELECT d.series_ref AS "seriesRef", d.series_title AS "seriesTitle",
               u.username AS "deletedBy", d.reason, d.snapshot,
@@ -260,8 +263,9 @@ export async function reportRoutes(app: FastifyInstance, ctx: AppContext): Promi
         WHERE d.restored_at IS NULL
         ORDER BY d.deleted_at DESC`,
     );
-    return reply.send({ content: rows });
-  });
+      return reply.send({ content: rows });
+    },
+  );
 
   app.post('/v1/deleted-works/:seriesRef/restore', { preHandler: requireSession(ctx) }, async (request, reply) => {
     const { seriesRef } = request.params as { seriesRef: string };

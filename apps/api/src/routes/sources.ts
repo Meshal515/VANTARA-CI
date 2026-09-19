@@ -8,7 +8,7 @@ import {
   type ProbeEvidence,
   type SourceVerdict,
 } from '@vantara/domain';
-import { requireSession, sessionOf, type AppContext } from '../lib/context.ts';
+import { requireAdmin, requireSession, sessionOf, type AppContext } from '../lib/context.ts';
 
 interface VerdictRow {
   source_id: string;
@@ -149,7 +149,7 @@ export async function sourceRoutes(app: FastifyInstance, ctx: AppContext): Promi
     return reply.send({ content });
   });
 
-  app.get('/v1/sources/:id/evidence', { preHandler: requireSession(ctx) }, async (request, reply) => {
+  app.get('/v1/sources/:id/evidence', { preHandler: [requireSession(ctx), requireAdmin(ctx)] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const row = await queryOne<VerdictRow>(
       `SELECT * FROM vantara_source_verdicts WHERE source_id = $1`,
@@ -270,7 +270,7 @@ export async function sourceRoutes(app: FastifyInstance, ctx: AppContext): Promi
   });
 
   /** تاريخ فحص مصدر: لماذا حكمه ما هو، وهل تغيّر. */
-  app.get('/v1/sources/:id/probes', { preHandler: requireSession(ctx) }, async (request, reply) => {
+  app.get('/v1/sources/:id/probes', { preHandler: [requireSession(ctx), requireAdmin(ctx)] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const rows = await query(
       `SELECT verdict, probe_query AS "probeQuery", probed_work AS "probedWork",

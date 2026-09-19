@@ -88,4 +88,15 @@ export function sessionOf(request: FastifyRequest): Session {
   return session;
 }
 
+/** حارس المسارات التشغيلية التي لا يحتاجها المستخدم العادي. */
+export function requireAdmin(ctx: AppContext) {
+  return async function (request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const session = sessionOf(request);
+    const user = await ctx.uchiyomi.me(session.token);
+    if (user.role !== 'admin') {
+      await reply.code(403).send({ error: 'admin_only' });
+    }
+  };
+}
+
 export { SESSION_COOKIE };
