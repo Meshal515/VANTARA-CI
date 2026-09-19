@@ -181,6 +181,9 @@ export class UchiyomiClient {
       method: 'POST',
       token: sessionToken,
       body: options,
+      // إنشاء التوكن ليس idempotent. إذا أنشأه upstream ثم انقطع الرد، إعادة
+      // POST تنشئ credential ثانيًا لا نعرف id حقه ويبقى صالحًا حتى انتهاءه.
+      noRetry: true,
     });
   }
 
