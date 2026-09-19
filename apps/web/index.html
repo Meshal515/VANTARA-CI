@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5"
+    />
+    <title>VANTARA</title>
+    <meta name="description" content="مكتبة وقارئ خاص للمانجا والمانهوا والمانها" />
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="color-scheme" content="dark" />
+
+    <!-- iOS لا يقرأ الـmanifest: يحتاج وسومه الخاصة ليفتح بلا شريط متصفح -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="VANTARA" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+
+    <link rel="icon" href="/icons/favicon-32.png" sizes="32x32" />
+    <link rel="icon" href="/icons/icon-512.png" sizes="512x512" />
+
+    <link rel="stylesheet" href="/styles.css" />
+    <!-- الخط محلي: طلب خارجي في أول رسم يؤخّر أول نص مقروء -->
+    <link
+      rel="preload"
+      href="/fonts/NotoNaskhArabic-Regular.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <style>
+      @font-face {
+        font-family: 'Noto Naskh Arabic';
+        src: url('/fonts/NotoNaskhArabic-Regular.woff2') format('woff2');
+        font-weight: 400;
+        font-display: swap;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      الرسم الأول يطابق البوابة التي ستُبنى بعده: شعار واسم في المنتصف على
+      أسود. أي شيء مختلف هنا يُنتج وميضًا بين الرسم الأول ورسم التطبيق.
+    -->
+    <div id="root">
+      <main class="gate">
+        <section class="gate__inner">
+          <header class="gate__brand">
+            <img class="gate__mark" src="/icons/icon-512.png" alt="" width="62" height="62" />
+            <h1 class="gate__word">VANTARA</h1>
+            <p class="gate__tag">عالم واحد .. لكل القصص</p>
+          </header>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
