@@ -39,9 +39,24 @@ jobs:
           set -euo pipefail
           pattern='-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+'
           commits="$(git rev-list --all)"
-          if [ -n "$commits" ] && git grep -nI -E -e "$pattern" $commits; then
-            echo 'Credential-like material found in public Git history.'
-            exit 1
+          if [ -n "$commits" ]; then
+            set +e
+            git grep -nI -E -e "$pattern" $commits > /tmp/history-credential-scan 2>&1
+            scan_status=$?
+            set -e
+            case "$scan_status" in
+              0)
+                cat /tmp/history-credential-scan
+                echo 'Credential-like material found in public Git history.'
+                exit 1
+                ;;
+              1) ;;
+              *)
+                cat /tmp/history-credential-scan
+                echo "Credential history scan itself failed with status $scan_status."
+                exit "$scan_status"
+                ;;
+            esac
           fi
 
       - name: Reject tracked secret files
@@ -62,10 +77,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if git grep -nI -E '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+' --             ':!*.test.*' ':!**/tests/**' ':!.env.example'; then
-            echo 'Credential-like material found in tracked production source.'
-            exit 1
-          fi
+          set +e
+          git grep -nI -E -e '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+' -- \
+            ':!*.test.*' ':!**/tests/**' ':!.env.example' > /tmp/source-credential-scan 2>&1
+          scan_status=$?
+          set -e
+          case "$scan_status" in
+            0)
+              cat /tmp/source-credential-scan
+              echo 'Credential-like material found in tracked production source.'
+              exit 1
+              ;;
+            1) ;;
+            *)
+              cat /tmp/source-credential-scan
+              echo "Credential source scan itself failed with status $scan_status."
+              exit "$scan_status"
+              ;;
+          esac
           grep -q '__D1_DATABASE_ID__' services/sync-worker/wrangler.toml
 
       - uses: pnpm/action-setup@v4
