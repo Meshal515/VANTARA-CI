@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // الـWorker يعمل على منصة الويب لا Node: fetch وcrypto.subtle وbtoa
+    // وResponse كلها globals، وتأتي من lib DOM لا من @types/node.
+    "lib": ["ES2023", "DOM"],
+    "types": [],
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"]
+}

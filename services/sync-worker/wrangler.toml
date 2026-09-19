@@ -1,0 +1,24 @@
+name = "vantara-sync"
+main = "src/secure-index.ts"
+compatibility_date = "2025-01-01"
+
+# لا observability مدفوعة ولا cron: الخطة المجانية تكفي ثلاثة مستخدمين
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vantara"
+# يُستبدل عند النشر بمعرّف القاعدة الفعلي (انظر .github/workflows/sync-worker.yml).
+# تثبيته في المستودع يعني أن أي fork ينشر على قاعدة غيره.
+database_id = "__D1_DATABASE_ID__"
+
+[observability]
+enabled = true
+
+# الأسرار الثلاثة لا تُكتب هنا:
+# - VANTARA_IDENTITY_SECRET: توقيع access token v2 المشترك مع Content API.
+# - VANTARA_DEVICE_PEPPER: HMAC لبيانات device/pairing المخزنة في D1.
+# - VANTARA_SESSION_SECRET: مهايئ داخلي مؤقت للـlegacy sync handlers حتى B3.
+# تُضبط جميعها بـ`wrangler secret put` ولا تدخل المستودع ولا الـAPK.
+[vars]
+ALLOWED_ORIGINS = "https://vantara.pages.dev"
