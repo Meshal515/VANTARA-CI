@@ -70,7 +70,8 @@ test('public backend mirror contains no high-confidence credential literals', ()
       if (pattern.test(text)) findings.push(`${path}: ${name}`);
     }
 
-    if (!/(?:^|\\/)(?:tests?\\/|[^/]+\\.test\\.)/.test(path)) {
+    const isTestFixture = path.includes('/tests/') || path.includes('/test/') || path.includes('.test.');
+    if (!isTestFixture) {
       const assignment = /\\b(SESSION_SECRET|VANTARA_IDENTITY_SECRET|VANTARA_DEVICE_PEPPER|POSTGRES_PASSWORD|TEST_PASSWORD|TUNNEL_TOKEN|CLOUDFLARE_API_TOKEN)\\b\\s*[:=]\\s*["']([^"'\\n]{12,})["']/g;
       let match;
       while ((match = assignment.exec(text)) !== null) {
