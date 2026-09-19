@@ -79,8 +79,8 @@ jobs:
             services/translation-worker/requirements.txt
             services/translation-worker/requirements-dev.txt
 
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Install Python test dependencies
+        run: pip install Pillow==12.3.0 pytest==8.3.4
 
       - name: Install Noto test fonts
         run: |
