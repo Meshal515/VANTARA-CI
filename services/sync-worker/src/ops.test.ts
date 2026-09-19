@@ -181,6 +181,20 @@ describe('cumulative ops', () => {
     expect(statement?.sql).toContain('read_count = chapter_reads.read_count + 1');
   });
 
+  it('derives CHAPTER_DONE activity from a validated completion instead of trusting activity.add', () => {
+    const out = translate('chapter.complete', {
+      chapterKey: 'c1',
+      seriesRef: 's1',
+      chapterNumber: 7,
+      ratio: 1,
+      activeMs: 9_000,
+    });
+    const activity = out.find((entry) => entry.sql.includes('INSERT INTO activity'));
+    expect(activity?.values).toEqual(
+      expect.arrayContaining(['op-1:activity', 'dahmi', 'CHAPTER_DONE', 's1']),
+    );
+  });
+
   it('refuses a one-second open as a read', () => {
     expect(
       translate('chapter.complete', { chapterKey: 'c1', seriesRef: 's1', ratio: 1, activeMs: 400 }),
@@ -191,6 +205,11 @@ describe('cumulative ops', () => {
     const [statement] = translate('usage.add', { activeMs: 60_000, day: '2026-09-18' });
     expect(statement?.sql).toContain('active_ms = usage_daily.active_ms + excluded.active_ms');
     expect(statement?.sql).toContain('WHERE NOT EXISTS (SELECT 1 FROM applied_ops WHERE op_id = ?)');
+  });
+
+  it('rejects a malformed usage day instead of poisoning weekly totals', () => {
+    expect(translate('usage.add', { activeMs: 5_000, day: 'zzzzzzzzzz' })).toEqual([]);
+    expect(translate('usage.add', { activeMs: 5_000, day: '2026-02-31' })).toEqual([]);
   });
 });
 
@@ -235,6 +254,17 @@ describe('collections', () => {
     expect(later[0]?.values).toContain('read_later');
   });
 
+  it('derives FAVORITED only when favorite membership is enabled', () => {
+    const added = translate('favorite.set', { seriesRef: 's1', member: true });
+    const removed = translate('favorite.set', { seriesRef: 's1', member: false });
+    const later = translate('readLater.set', { seriesRef: 's1', member: true });
+    expect(added.find((entry) => entry.sql.includes('INSERT INTO activity'))?.values).toEqual(
+      expect.arrayContaining(['op-1:activity', 'dahmi', 'FAVORITED', 's1']),
+    );
+    expect(removed.some((entry) => entry.sql.includes('INSERT INTO activity'))).toBe(false);
+    expect(later.some((entry) => entry.sql.includes('INSERT INTO activity'))).toBe(false);
+  });
+
   it('reorders a whole list in one op', () => {
     // ترتيب كامل لا حركة عنصر: حركتان من جهازين تتشابكان
     const out = translate('collection.reorder', {
@@ -255,6 +285,15 @@ describe('collections', () => {
     expect(translate('collection.reorder', { kind: 'favorite', order: [] })).toEqual([]);
     expect(translate('collection.reorder', { kind: 'favorite' })).toEqual([]);
   });
+
+  it('rejects an oversized reorder instead of silently applying only its first 100 items', () => {
+    expect(
+      translate('collection.reorder', {
+        kind: 'favorite',
+        order: Array.from({ length: 101 }, (_, i) => `series:${i}`),
+      }),
+    ).toEqual([]);
+  });
 });
 
 describe('library and recommendations carry the same descriptor', () => {
@@ -266,6 +305,9 @@ describe('library and recommendations carry the same descriptor', () => {
       sourceId: 'src',
     });
     expect(out.some((entry) => entry.sql.includes('INSERT INTO works'))).toBe(true);
+    expect(out.find((entry) => entry.sql.includes('INSERT INTO activity'))?.values).toEqual(
+      expect.arrayContaining(['op-1:activity', 'dahmi', 'LIBRARY_ADD', 's1']),
+    );
   });
 
   it('records it on a recommendation', () => {
@@ -579,5 +621,12 @@ describe('unknown ops', () => {
   it('produces nothing rather than throwing', () => {
     // الرفض بخطأ يوقف طابور العميل عند عملية واحدة إلى الأبد
     expect(translate('something.new', { anything: true })).toEqual([]);
+  });
+});
+
+
+describe('deprecated client-authored activity', () => {
+  it('never translates activity.add into a database write', () => {
+    expect(translate('activity.add', { verb: 'FABRICATED', seriesRef: 's1' })).toEqual([]);
   });
 });

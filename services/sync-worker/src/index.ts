@@ -15,7 +15,6 @@ import {
   clampUsageCredit,
   dedupeOps,
   isCompletedRead,
-  mergeFields,
   mergeProgress,
   collectionView,
   isCollectionKind,
@@ -330,6 +329,12 @@ function asNumber(value: unknown): number | null {
   return typeof n === 'number' && Number.isFinite(n) ? n : null;
 }
 
+function isIsoDay(value: string): boolean {
+  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return false;
+  const at = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(at) && new Date(at).toISOString().slice(0, 10) === value;
+}
+
 /**
  * يترجم عملية واحدة إلى جُمل D1.
  *
@@ -585,13 +590,28 @@ export function statementsFor(
                rev = excluded.rev`,
           )
           .bind(userId, chapterKey, seriesRef, asNumber(p['chapterNumber']), now, now, rev, op.opId),
+        ...socialActivityStatements(db, {
+          opId: op.opId,
+          actorId: userId,
+          verb: 'CHAPTER_DONE',
+          accounts: ctx.accounts,
+          seriesRef,
+          link: socialLinkFor({ kind: 'work', seriesRef }),
+          payload: { chapter: asNumber(p['chapterNumber']) },
+          now,
+          rev,
+        }),
       ];
     }
 
     case 'usage.add': {
       const ms = clampUsageCredit(asNumber(p['activeMs']) ?? 0);
       if (ms <= 0) return null;
-      const day = asString(p['day'], 10) ?? new Date(now).toISOString().slice(0, 10);
+      const suppliedDay = p['day'];
+      const day = suppliedDay == null
+        ? new Date(now).toISOString().slice(0, 10)
+        : asString(suppliedDay, 10);
+      if (!day || !isIsoDay(day)) return null;
       return [
         db
           .prepare(
@@ -637,6 +657,17 @@ export function statementsFor(
             now,
             rev,
           ),
+        ...socialActivityStatements(db, {
+          opId: op.opId,
+          actorId: userId,
+          verb: 'LIBRARY_ADD',
+          accounts: ctx.accounts,
+          seriesRef,
+          link: socialLinkFor({ kind: 'work', seriesRef }),
+          payload: { title: asString(p['seriesTitle'], 300) },
+          now,
+          rev,
+        }),
       ];
     }
 
@@ -691,6 +722,18 @@ export function statementsFor(
                rev = excluded.rev`,
           )
           .bind(userId, kind, seriesRef, member, asNumber(p['position']), now, rev),
+        ...(op.kind === 'favorite.set' && member === 1
+          ? socialActivityStatements(db, {
+              opId: op.opId,
+              actorId: userId,
+              verb: 'FAVORITED',
+              accounts: ctx.accounts,
+              seriesRef,
+              link: socialLinkFor({ kind: 'work', seriesRef }),
+              now,
+              rev,
+            })
+          : []),
       ];
     }
 
@@ -703,13 +746,12 @@ export function statementsFor(
     case 'collection.reorder': {
       const kind = asString(p['kind'], 20);
       const order = Array.isArray(p['order']) ? p['order'] : null;
-      if (!kind || !isCollectionKind(kind) || !order) return null;
-      // السقف 100 لا 500: كل مرجع جملة `UPDATE` في نفس الدفعة الذرّية، ودفعة
-      // بخمس مئة جملة تقترب من حدود D1 فتفشل كلها. قائمة أطول تُرتَّب على دفعات.
+      if (!kind || !isCollectionKind(kind) || !order || order.length > 100) return null;
+      // السقف 100 لا 500: كل مرجع جملة `UPDATE` في نفس الدفعة الذرّية. لا
+      // نقتطع الطلب بصمت: تطبيق أول 100 ثم إقرار العملية يفقد بقية الترتيب.
       const refs = order
         .map((value) => asString(value, 200))
-        .filter((value): value is string => value !== null)
-        .slice(0, 100);
+        .filter((value): value is string => value !== null);
       if (refs.length === 0) return null;
       return refs.map((seriesRef, position) =>
         db
@@ -1093,25 +1135,9 @@ export function statementsFor(
     }
 
     case 'activity.add': {
-      const verb = asString(p['verb'], 40);
-      if (!verb) return null;
-      return [
-        db
-          .prepare(
-            `INSERT INTO activity (id, actor_id, verb, series_ref, payload, created_at, rev)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO NOTHING`,
-          )
-          .bind(
-            op.opId,
-            userId,
-            verb,
-            asString(p['seriesRef'], 200),
-            JSON.stringify(p['payload'] ?? {}),
-            now,
-            rev,
-          ),
-      ];
+      // Deprecated compatibility op. handleOps settles it as skipped so an old
+      // APK drains its queue, but client-authored activity is never published.
+      return null;
     }
 
     default:
@@ -1121,6 +1147,8 @@ export function statementsFor(
 
 /** التعديلات التي تحتاج قراءة قبل الكتابة: rev لكل حقل مخزّن كـJSON. */
 const FIELD_MERGE_KINDS = new Set(['profile.patch', 'settings.patch']);
+/** عميل قديم قد يرسلها؛ تُصرَّف بلا نشر لأن النشاط يولّده الخادم فقط. */
+const DEPRECATED_NOOP_KINDS = new Set(['activity.add']);
 
 /** العمليات التي تحتاج قائمة الحسابات (بثّ لكل المستلمين). */
 const ACCOUNT_AWARE_KINDS = new Set([
@@ -1128,6 +1156,9 @@ const ACCOUNT_AWARE_KINDS = new Set([
   'rating.set',
   'comment.add',
   'reaction.set',
+  'chapter.complete',
+  'library.add',
+  'favorite.set',
 ]);
 
 async function allAccountIds(env: Env): Promise<string[]> {
@@ -1241,62 +1272,76 @@ const PROFILE_COLUMNS: Record<string, string> = {
 async function applyFieldMerge(
   op: IncomingOp,
   userId: string,
-  rev: number,
+  now: number,
   env: Env,
-): Promise<void> {
+): Promise<number> {
+  // إعادة نفس op_id لا يجوز أن تحصل على rev جديد وتكتب قيمة قديمة فوق الأحدث.
+  const previous = await env.DB.prepare('SELECT rev FROM applied_ops WHERE op_id = ?')
+    .bind(op.opId)
+    .first<{ rev: number }>();
+  if (previous) return Number(previous.rev);
+
+  const rev = await allocateRev(env);
   // الهوية الداخلية تُسقط قبل الدمج، ولا يُرفض الطلب: الرفض يجعل تعديل الاسم
-  // يفشل بلا سبب ظاهر للمستخدم
+  // يفشل بلا سبب ظاهر للمستخدم.
   const patch = stripImmutable((op.payload['fields'] ?? {}) as Record<string, unknown>);
+  const statements: D1PreparedStatement[] = [];
+
+  // مفاتيح settings تدخل JSON path. نقبل أسماء الحقول المعتادة فقط حتى لا
+  // يستطيع مفتاح ملفّق تغيير مسار JSON آخر.
+  const safeFields = Object.entries(patch).filter(([key]) => /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key));
 
   if (op.kind === 'settings.patch') {
-    const row = await env.DB.prepare('SELECT data, field_revs FROM settings WHERE user_id = ?')
-      .bind(userId)
-      .first<{ data: string; field_revs: string }>();
-    const existing = JSON.parse(row?.data ?? '{}') as Record<string, unknown>;
-    const revs = JSON.parse(row?.field_revs ?? '{}') as Record<string, number>;
-    const merged = mergeFields(existing, revs, patch, rev);
-    await env.DB.prepare(
-      `INSERT INTO settings (user_id, data, field_revs, rev) VALUES (?, ?, ?, ?)
-       ON CONFLICT (user_id) DO UPDATE SET data = excluded.data, field_revs = excluded.field_revs, rev = excluded.rev`,
-    )
-      .bind(userId, JSON.stringify(merged.value), JSON.stringify(merged.revs), rev)
-      .run();
-    return;
+    statements.push(
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO settings (user_id, data, field_revs, rev)
+         VALUES (?, '{}', '{}', 0)`,
+      ).bind(userId),
+    );
+    for (const [key, value] of safeFields) {
+      const path = `$.${key}`;
+      statements.push(
+        env.DB.prepare(
+          `UPDATE settings
+              SET data = json_set(data, ?, json(?)),
+                  field_revs = json_set(field_revs, ?, ?),
+                  rev = ?
+            WHERE user_id = ?
+              AND ? > COALESCE(json_extract(field_revs, ?), 0)
+              AND NOT EXISTS (SELECT 1 FROM applied_ops WHERE op_id = ?)`,
+        ).bind(path, JSON.stringify(value), path, rev, rev, userId, rev, path, op.opId),
+      );
+    }
+  } else {
+    statements.push(
+      env.DB.prepare(
+        'INSERT OR IGNORE INTO profiles (user_id, field_revs, rev) VALUES (?, ?, 0)',
+      ).bind(userId, '{}'),
+    );
+    for (const [key, value] of safeFields) {
+      const column = PROFILE_COLUMNS[key];
+      if (!column) continue;
+      const path = `$.${key}`;
+      statements.push(
+        env.DB.prepare(
+          `UPDATE profiles
+              SET ${column} = ?, field_revs = json_set(field_revs, ?, ?), rev = ?
+            WHERE user_id = ?
+              AND ? > COALESCE(json_extract(field_revs, ?), 0)
+              AND NOT EXISTS (SELECT 1 FROM applied_ops WHERE op_id = ?)`,
+        ).bind(value, path, rev, rev, userId, rev, path, op.opId),
+      );
+    }
   }
 
-  const row = await env.DB.prepare(
-    'SELECT display_name, avatar_key, banner_key, bio, accent, field_revs FROM profiles WHERE user_id = ?',
-  )
-    .bind(userId)
-    .first<Record<string, unknown>>();
-  const existing: Record<string, unknown> = {
-    displayName: row?.['display_name'] ?? null,
-    avatarKey: row?.['avatar_key'] ?? null,
-    bannerKey: row?.['banner_key'] ?? null,
-    bio: row?.['bio'] ?? null,
-    accent: row?.['accent'] ?? null,
-  };
-  const revs = JSON.parse((row?.['field_revs'] as string | undefined) ?? '{}') as Record<string, number>;
-  // حقل غير معروف يُسقط: عمود لا وجود له يُفشل الجملة كلها
-  const known: Record<string, unknown> = {};
-  for (const key of Object.keys(patch)) if (key in PROFILE_COLUMNS) known[key] = patch[key];
-  const merged = mergeFields(existing, revs, known, rev);
-
-  await env.DB.prepare(
-    `UPDATE profiles SET display_name = ?, avatar_key = ?, banner_key = ?, bio = ?, accent = ?, field_revs = ?, rev = ?
-      WHERE user_id = ?`,
-  )
-    .bind(
-      merged.value['displayName'] ?? null,
-      merged.value['avatarKey'] ?? null,
-      merged.value['bannerKey'] ?? null,
-      merged.value['bio'] ?? null,
-      merged.value['accent'] ?? null,
-      JSON.stringify(merged.revs),
-      rev,
-      userId,
-    )
-    .run();
+  // D1 batch معاملة واحدة: الأثر وحجز op_id يثبتان معًا أو لا شيء منهما.
+  statements.push(
+    env.DB.prepare(
+      'INSERT OR IGNORE INTO applied_ops (op_id, user_id, kind, rev, applied_at) VALUES (?, ?, ?, ?, ?)',
+    ).bind(op.opId, userId, op.kind, rev, now),
+  );
+  await env.DB.batch(statements);
+  return rev;
 }
 
 const MAX_OPS_PER_REQUEST = 200;
@@ -1334,13 +1379,14 @@ async function handleOps(request: Request, env: Env, userId: string, now: number
     return json({ error: authorizationError.error }, { status: authorizationError.status });
   }
 
-  const rev = await allocateRev(env);
-
-  // دمج الحقول يحتاج قراءة قبل الكتابة فلا يدخل الدفعة الذرّية. يُنفَّذ أولًا،
-  // وإعادة تنفيذه بلا ضرر: نفس القيم الواردة تُكتب مرة أخرى فحسب.
+  // كل رقعة حقول لها rev مستقل، وأثرها وحجز op_id يثبتان في دفعة واحدة.
+  // هذا يمنع رقعة قديمة معادة من الكتابة فوق قيمة أحدث، ويجعل رقعتين متداخلتين
+  // في نفس الطلب تتقدمان بالترتيب بدل أن تشتركا في rev واحد.
   for (const op of ops) {
-    if (FIELD_MERGE_KINDS.has(op.kind)) await applyFieldMerge(op, userId, rev, env);
+    if (FIELD_MERGE_KINDS.has(op.kind)) await applyFieldMerge(op, userId, now, env);
   }
+
+  const rev = await allocateRev(env);
 
   // الأثر ثم الحجز، في دفعة واحدة.
   //
@@ -1371,14 +1417,21 @@ async function handleOps(request: Request, env: Env, userId: string, now: number
   // أن يُعاد إلى الأبد أو يُنسى. فلا حقل جديد هنا: الإسقاط هو الإشارة.
   const statements: D1PreparedStatement[] = [];
   const unapplied = new Set<string>();
+  const skipped = new Set<string>();
   for (const op of ops) {
     if (FIELD_MERGE_KINDS.has(op.kind)) continue;
+    if (DEPRECATED_NOOP_KINDS.has(op.kind)) {
+      skipped.add(op.opId);
+      continue;
+    }
     const built = statementsFor(op, userId, rev, now, env, ctx);
     if (built && built.length > 0) statements.push(...built);
     else unapplied.add(op.opId);
   }
-  const applied = ops.filter((op) => !unapplied.has(op.opId));
+  const applied = ops.filter((op) => !unapplied.has(op.opId) && !skipped.has(op.opId));
   for (const op of applied) {
+    // عمليات الحقول حجزت op_id ذرّيًا مع أثرها داخل applyFieldMerge.
+    if (FIELD_MERGE_KINDS.has(op.kind)) continue;
     statements.push(
       env.DB.prepare(
         'INSERT OR IGNORE INTO applied_ops (op_id, user_id, kind, rev, applied_at) VALUES (?, ?, ?, ?, ?)',
@@ -1394,7 +1447,7 @@ async function handleOps(request: Request, env: Env, userId: string, now: number
   // و«كانت مطبَّقة» لا يغيّر شيئًا عنده، والحقلان يبقيان للتشخيص.
   return json({
     applied: applied.map((op) => op.opId),
-    skipped: [],
+    skipped: [...skipped],
     cursor: rev,
     serverRev: await currentRev(env),
   });
