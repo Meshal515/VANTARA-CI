@@ -431,6 +431,35 @@ describe('deleted works', () => {
 });
 
 describe('logout', () => {
+  it('does not pretend Bearer logout revoked Worker device state', async () => {
+    if (skipUnlessSession()) return;
+
+    const identityId = identityIdForUsername(USERNAME);
+    expect(identityId).not.toBeNull();
+    if (!identityId) return;
+
+    const bearer = await mintIdentityToken(
+      { userId: identityId, deviceId: 'ci-live-device' },
+      TEST_IDENTITY_SECRET,
+    );
+
+    const one = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/logout',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(one.statusCode).toBe(409);
+    expect(one.json()).toEqual({ error: 'device_logout_required' });
+
+    const all = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/logout-all',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(all.statusCode).toBe(409);
+    expect(all.json()).toEqual({ error: 'device_logout_all_required' });
+  });
+
   it('closes the legacy cookie without stranding the active VANTARA identity link', async () => {
     if (skipUnlessSession()) return;
 
