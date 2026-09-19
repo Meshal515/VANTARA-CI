@@ -125,13 +125,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS -X POST http://127.0.0.1:8080/api/setup             -H 'Content-Type: application/json'             --data '{"username":"mishal","password":"ci-only-password-1234567890123456","displayName":"CI Admin"}'
+          curl -fsS -X POST http://127.0.0.1:8080/api/setup             -H 'Content-Type: application/json'             --data '{"username":"mansour","password":"ci-only-password-1234567890123456","displayName":"CI Admin"}'
 
       - name: Probe Uchiyomi token self-revocation
         shell: bash
         run: |
           set -euo pipefail
-          login_json="$(curl -fsS -X POST http://127.0.0.1:8080/auth/login             -H 'Content-Type: application/json'             --data '{"username":"mishal","password":"ci-only-password-1234567890123456"}')"
+          login_json="$(curl -fsS -X POST http://127.0.0.1:8080/auth/login             -H 'Content-Type: application/json'             --data '{"username":"mansour","password":"ci-only-password-1234567890123456"}')"
           session_token="$(printf '%s' "$login_json" | jq -er '.accessToken')"
 
           minted_json="$(curl -fsS -X POST http://127.0.0.1:8080/api/tokens             -H "Authorization: Bearer $session_token"             -H 'Content-Type: application/json'             --data '{"name":"vantara-self-revoke-probe","scopes":["read","write"],"expiresInDays":1}')"
@@ -189,7 +189,7 @@ jobs:
         env:
           DATABASE_URL: postgres://vantara:vantara-ci-password@127.0.0.1:5433/vantara
           UCHIYOMI_URL: http://127.0.0.1:8080
-          TEST_USERNAME: mishal
+          TEST_USERNAME: mansour
           TEST_PASSWORD: ci-only-password-1234567890123456
           VANTARA_REQUIRE_LIVE_INTEGRATION: 'true'
         run: pnpm --filter @vantara/api test
