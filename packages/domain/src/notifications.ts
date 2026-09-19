@@ -150,9 +150,7 @@ export function notificationTargets(input: {
   to?: string | null;
 }): string[] {
   const actor = input.actorId;
-  if (input.to) {
-    return input.to === actor || !input.accounts.includes(input.to) ? [] : [input.to];
-  }
+  if (input.to) return input.to === actor ? [] : [input.to];
   return [...new Set(input.accounts)].filter((id) => id !== actor).sort();
 }
 
