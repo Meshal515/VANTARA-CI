@@ -1,0 +1,100 @@
+name: VANTARA Backend CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject tracked secret files
+        shell: bash
+        run: |
+          bad="$(
+            git ls-files |
+              grep -E '(^|/)(\.env($|\.)|\.dev\.vars$|id_rsa$|.*\.(pem|key|p12|pfx|jks)$)' |
+              grep -vE '(^|/)\.env\.example$' || true
+          )"
+          if [ -n "$bad" ]; then
+            echo "Secret-like tracked files are not allowed:"
+            echo "$bad"
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Clean database bootstrap + backup/restore
+        run: sh infra/test-db-bootstrap.sh
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build backend workspaces
+        run: pnpm -r build
+
+      - name: Typecheck backend workspaces
+        run: pnpm -r typecheck
+
+      - name: Test backend workspaces
+        run: pnpm -r test
+
+  translation-worker:
+    name: Translation worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: services/translation-worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            services/translation-worker/requirements.txt
+            services/translation-worker/requirements-dev.txt
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Install Noto test fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-core
+          test -f /usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf
+          test -f /usr/share/fonts/truetype/noto/NotoSans-Regular.ttf
+
+      - name: Verify RAQM support
+        run: |
+          python - <<'PY'
+          from PIL import features
+          assert features.check('raqm'), 'Pillow was installed without RAQM'
+          print('RAQM OK')
+          PY
+
+      - name: Run translation tests
+        run: pytest -q
