@@ -87,6 +87,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Lint backend workspaces
+        run: pnpm -r --if-present lint
+
       - name: Build backend workspaces
         run: pnpm -r build
 
