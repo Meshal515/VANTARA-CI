@@ -85,6 +85,23 @@ test('public backend mirror contains no high-confidence credential literals', ()
   assert.deepEqual(findings, []);
 });
 
+test('production credential scan cannot parse a leading-hyphen signature as an option', () => {
+  const workflow = readText('.github/workflows/ci.yml');
+  const start = workflow.indexOf('Scan production source for credential signatures');
+  const end = workflow.indexOf('\n      - ', start + 1);
+  assert.ok(start >= 0, 'missing production credential scan step');
+  const step = workflow.slice(start, end > start ? end : undefined);
+
+  // The private-key signature begins with hyphens. Without -e/--regexp, git
+  // parses it as an option, exits with an error, and an `if git grep ...`
+  // silently treats that error exactly like "no credentials found".
+  assert.match(
+    step,
+    /git grep[^\n]*\s-e\s+['"]-----BEGIN /,
+    'credential signature must be passed with -e so a scan error cannot masquerade as clean',
+  );
+});
+
 test('public CI uses no repository secrets and cannot deploy', () => {
   const workflow = readText('.github/workflows/ci.yml');
   assert.ok(workflow.length > 0, 'missing public CI workflow');
