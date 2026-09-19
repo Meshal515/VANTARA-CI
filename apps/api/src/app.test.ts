@@ -11,6 +11,7 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { closePool, initPool, query } from '@vantara/db';
+import { identityIdForUsername, mintIdentityToken } from '@vantara/domain';
 import { buildApp } from './app.ts';
 import { loadConfig } from './lib/config.ts';
 import { SESSION_COOKIE } from './lib/context.ts';
@@ -19,10 +20,11 @@ import { decrypt, deriveKey } from './lib/crypto.ts';
 const DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgres://vantara:vantara_dev@127.0.0.1:5433/vantara';
 const UCHIYOMI_URL = process.env['UCHIYOMI_URL'] ?? 'http://127.0.0.1:8080';
-const USERNAME = process.env['TEST_USERNAME'] ?? 'mishal';
+const USERNAME = process.env['TEST_USERNAME'] ?? 'mansour';
 // لا كلمة مرور افتراضية في الكود: أي قيمة هنا تصبح سرًّا منشورًا في المستودع
 const PASSWORD = process.env['TEST_PASSWORD'];
 const TEST_SESSION_SECRET = 'test-secret-that-is-at-least-32-chars-long';
+const TEST_IDENTITY_SECRET = 'test-identity-secret-that-is-at-least-32-chars';
 const REQUIRE_LIVE_INTEGRATION = process.env['VANTARA_REQUIRE_LIVE_INTEGRATION'] === 'true';
 
 let app: FastifyInstance;
@@ -60,7 +62,7 @@ beforeAll(async () => {
     DATABASE_URL,
     UCHIYOMI_URL,
     SESSION_SECRET: TEST_SESSION_SECRET,
-    VANTARA_IDENTITY_SECRET: 'test-identity-secret-that-is-at-least-32-chars',
+    VANTARA_IDENTITY_SECRET: TEST_IDENTITY_SECRET,
     COOKIE_SECURE: 'false',
     LOG_LEVEL: 'error',
   });
@@ -429,8 +431,23 @@ describe('deleted works', () => {
 });
 
 describe('logout', () => {
-  it('revokes both the VANTARA session and its upstream Uchiyomi token', async () => {
+  it('closes the legacy cookie without stranding the active VANTARA identity link', async () => {
     if (skipUnlessSession()) return;
+
+    const identityId = identityIdForUsername(USERNAME);
+    expect(identityId).not.toBeNull();
+    if (!identityId) return;
+
+    const bearer = await mintIdentityToken(
+      { userId: identityId, deviceId: 'ci-live-device' },
+      TEST_IDENTITY_SECRET,
+    );
+    const identityBefore = await app.inject({
+      method: 'GET',
+      url: '/v1/auth/me',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(identityBefore.statusCode).toBe(200);
 
     const sessionId = cookie.slice(`${SESSION_COOKIE}=`.length);
     const rows = await query<{ token_encrypted: string; token_id: string | null }>(
@@ -453,12 +470,22 @@ describe('logout', () => {
     const out = await app.inject({ method: 'POST', url: '/v1/auth/logout', headers: { cookie } });
     expect(out.statusCode).toBe(204);
 
-    const after = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: { cookie } });
-    expect(after.statusCode).toBe(401);
+    const afterCookie = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: { cookie } });
+    expect(afterCookie.statusCode).toBe(401);
+
+    // Owner linking stores this upstream token behind the VANTARA identity.
+    // Logging out the legacy cookie is not an unlink operation and must not
+    // leave the modern Bearer path pointing at a revoked upstream credential.
+    const identityAfter = await app.inject({
+      method: 'GET',
+      url: '/v1/auth/me',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(identityAfter.statusCode).toBe(200);
 
     const afterUpstream = await fetch(`${UCHIYOMI_URL}/auth/me`, {
       headers: { authorization: `Bearer ${upstreamToken}` },
     });
-    expect(afterUpstream.status).toBe(401);
+    expect(afterUpstream.status).toBe(200);
   });
 });
