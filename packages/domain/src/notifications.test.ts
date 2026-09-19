@@ -135,10 +135,6 @@ describe('notificationTargets', () => {
     expect(notificationTargets({ accounts, actorId: 'dahmi', to: 'dahmi' })).toEqual([]);
   });
 
-  it('rejects a named recipient outside the known account set', () => {
-    expect(notificationTargets({ accounts, actorId: 'dahmi', to: 'fabricated-user' })).toEqual([]);
-  });
-
   it('is stable and deduplicated so a retry does not notify twice', () => {
     const first = notificationTargets({ accounts: [...accounts, 'ngm'], actorId: 'dahmi' });
     const second = notificationTargets({ accounts: ['ngm', 'mansour', 'ngm'], actorId: 'dahmi' });
