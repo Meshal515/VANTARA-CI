@@ -1,0 +1,26 @@
+# ترويسات Cloudflare Pages.
+#
+# INV-03: الـContent API يعطّل CSP بحجة أنه لا يقدّم الواجهة — وهذا صحيح.
+# لكن Pages **هو** من يقدّمها، ولم يكن عليه CSP إطلاقًا. فموضع الفحص هنا لا
+# هناك.
+
+/*
+  # هذه الثلاث لا تكسر شيئًا ولا تحتاج تجربة، فتُفرض من الآن.
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+
+  # أما CSP فـ**تقرير فقط** عمدًا، ولا تُفرض قبل أن تُجرَّب.
+  #
+  # السبب أن `connect-src` لا يمكن حصرها مسبقًا: عنوانا المزامنة والمحتوى
+  # يُضبطان من الإعدادات وقت التشغيل (`lib/config.js`)، ونطاق Cloudflare
+  # Tunnel يتغيّر. وسياسةٌ مفروضة بتخمينٍ خاطئ تقطع التطبيق عن خادمه لثلاثة
+  # أشخاص، ولا يظهر العطل إلا عندهم.
+  #
+  # `style-src` يسمح بـ`unsafe-inline` لأن `index.html` يحمل كتلة `<style>`
+  # واحدة للرسم الأول؛ نقلها إلى ملف يؤخّر أول بكسل. والخطر الحقيقي هو
+  # السكربت المحقون، وهو ممنوع: لا سكربت مضمّن في الصفحة أصلًا.
+  #
+  # **كيف تُفرض:** شغّل بوابة E2E، وافتح console، فإن لم يظهر بلاغ
+  # `Content-Security-Policy` واحد، احذف `-Report-Only` من السطر التالي.
+  Content-Security-Policy-Report-Only: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
