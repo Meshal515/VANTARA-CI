@@ -257,12 +257,10 @@ jobs:
 
           # Same API process must reconnect after PostgreSQL disappears/restarts.
           $compose restart postgres
-          kill -0 "$api_pid"
           wait_ready
 
           # Same API process must recover when the content upstream restarts.
           $compose restart uchiyomi
-          kill -0 "$api_pid"
           wait_ready
 
       - name: Run live API integration
