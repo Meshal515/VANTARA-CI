@@ -18,7 +18,16 @@ jobs:
   node:
     name: Node backend
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      POSTGRES_USER: vantara
+      POSTGRES_PASSWORD: vantara-ci-password
+      POSTGRES_DB: vantara
+      UCHIYOMI_DB: uchiyomi
+      PUBLIC_ORIGIN: http://127.0.0.1:8080
+      SESSION_SECRET: ci-session-secret-ci-session-secret-1234
+      VANTARA_IDENTITY_SECRET: ci-identity-secret-ci-identity-secret-12
+      TUNNEL_TOKEN: ci-unused-tunnel-token
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +44,16 @@ jobs:
             echo "$bad"
             exit 1
           fi
+
+      - name: Scan production source for credential signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git grep -nI -E '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+' --             ':!*.test.*' ':!**/tests/**' ':!.env.example'; then
+            echo 'Credential-like material found in tracked production source.'
+            exit 1
+          fi
+          grep -q '__D1_DATABASE_ID__' services/sync-worker/wrangler.toml
 
       - uses: pnpm/action-setup@v4
         with:
@@ -60,6 +79,53 @@ jobs:
 
       - name: Test backend workspaces
         run: pnpm -r test
+
+      - name: Start live Postgres and Uchiyomi
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose='docker compose -f infra/docker-compose.yml -f infra/docker-compose.ci.yml'
+          $compose down -v --remove-orphans >/dev/null 2>&1 || true
+          $compose up -d postgres uchiyomi
+
+          for attempt in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8080/livez >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 120 ]; then
+              $compose ps
+              $compose logs postgres uchiyomi
+              exit 1
+            fi
+            sleep 2
+          done
+
+          curl -fsS http://127.0.0.1:8080/livez >/dev/null
+
+      - name: Create temporary Uchiyomi admin
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST http://127.0.0.1:8080/api/setup             -H 'Content-Type: application/json'             --data '{"username":"mishal","password":"ci-only-password-1234567890123456","displayName":"CI Admin"}'
+
+      - name: Apply VANTARA Postgres migrations
+        env:
+          DATABASE_URL: postgres://vantara:vantara-ci-password@127.0.0.1:5433/vantara
+        run: pnpm --filter @vantara/db migrate
+
+      - name: Run live API integration
+        env:
+          DATABASE_URL: postgres://vantara:vantara-ci-password@127.0.0.1:5433/vantara
+          UCHIYOMI_URL: http://127.0.0.1:8080
+          TEST_USERNAME: mishal
+          TEST_PASSWORD: ci-only-password-1234567890123456
+          VANTARA_REQUIRE_LIVE_INTEGRATION: 'true'
+        run: pnpm --filter @vantara/api test
+
+      - name: Stop live integration services
+        if: always()
+        shell: bash
+        run: docker compose -f infra/docker-compose.yml -f infra/docker-compose.ci.yml down -v --remove-orphans
 
   translation-worker:
     name: Translation worker
