@@ -29,7 +29,7 @@ async function pull(env: Env, since: number): Promise<Response> {
 describe('delta pagination revision boundaries', () => {
   it('does not drop rows when the page cap cuts through a shared revision', async () => {
     const { env, db } = testEnv();
-    db.prepare('INSERT INTO accounts (user_id, username, created_at, rev) VALUES (?, ?, ?, ?)')
+    db.prepare('INSERT OR IGNORE INTO accounts (user_id, username, created_at, rev) VALUES (?, ?, ?, ?)')
       .run(USER, 'mishal', 1, 1);
 
     const insert = db.prepare(
