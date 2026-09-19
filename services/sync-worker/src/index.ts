@@ -240,7 +240,7 @@ const PAGE_SIZE = 500;
  * كل الجداول في `batch` واحد: D1 تنفّذه كمعاملة واحدة، فاللقطة متسقة. قراءة
  * كل جدول بطلب منفصل تسمح بكتابة بينها، فيرى العميل تعليقًا بلا صاحبه.
  */
-async function handleSync(url: URL, env: Env): Promise<Response> {
+async function handleSync(url: URL, env: Env, userId: string): Promise<Response> {
   const since = Number(url.searchParams.get('since') ?? '0');
   const cursor = Number.isFinite(since) && since > 0 ? Math.floor(since) : 0;
   const serverRev = await currentRev(env);
@@ -250,11 +250,16 @@ async function handleSync(url: URL, env: Env): Promise<Response> {
     return json({ protocol: SYNC_PROTOCOL, reset: true, cursor: 0, serverRev, changes: {} });
   }
 
-  const statements = DELTA_TABLES.map(([table, columns]) =>
-    env.DB.prepare(
-      `SELECT ${columns} FROM ${table} WHERE rev > ? ORDER BY rev LIMIT ${PAGE_SIZE}`,
-    ).bind(cursor),
-  );
+  // بعض الجداول ملك الحساب نفسه ولا يجوز أن تغادر إلى جهاز صديق.
+  // فلترة الواجهة ليست حماية: إن وصل الصف إلى المرآة المحلية فقد كُشف أصلًا.
+  const selfScoped = (table: string) => table === 'settings' || table === 'notifications';
+
+  const statements = DELTA_TABLES.map(([table, columns]) => {
+    const statement = env.DB.prepare(
+      `SELECT ${columns} FROM ${table} WHERE rev > ?${selfScoped(table) ? ' AND user_id = ?' : ''} ORDER BY rev LIMIT ${PAGE_SIZE}`,
+    );
+    return selfScoped(table) ? statement.bind(cursor, userId) : statement.bind(cursor);
+  });
   const results = await env.DB.batch<Record<string, unknown>>(statements);
 
   const changes: Record<string, unknown[]> = {};
@@ -284,11 +289,12 @@ async function handleSync(url: URL, env: Env): Promise<Response> {
         boundaryStart -= 1;
       }
 
-      const boundary = await env.DB.prepare(
-        `SELECT ${columns} FROM ${table} WHERE rev = ? ORDER BY rev`,
-      )
-        .bind(lastRev)
-        .all<Record<string, unknown>>();
+      const boundaryStatement = env.DB.prepare(
+        `SELECT ${columns} FROM ${table} WHERE rev = ?${selfScoped(table) ? ' AND user_id = ?' : ''} ORDER BY rev`,
+      );
+      const boundary = await (
+        selfScoped(table) ? boundaryStatement.bind(lastRev, userId) : boundaryStatement.bind(lastRev)
+      ).all<Record<string, unknown>>();
       rows = [...rows.slice(0, boundaryStart), ...(boundary.results ?? rows.slice(boundaryStart))];
 
       // قد توجد مراجعات أعلى من lastRev؛ نبقي more=true فتُسحب في الجولة
@@ -1786,7 +1792,7 @@ export default {
       if (!userId) return json({ error: 'unauthorized' }, { status: 401 }, cors);
 
       let response: Response | null = null;
-      if (path === '/v1/sync' && request.method === 'GET') response = await handleSync(url, env);
+      if (path === '/v1/sync' && request.method === 'GET') response = await handleSync(url, env, userId);
       else if (path === '/v1/ops' && request.method === 'POST') response = await handleOps(request, env, userId, now);
       else if (path === '/v1/presence' && request.method === 'POST') response = await handlePresenceBeat(request, env, userId, now);
       else if (path === '/v1/presence' && request.method === 'GET') response = await handlePresenceList(env, now);
