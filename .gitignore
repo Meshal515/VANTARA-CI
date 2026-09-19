@@ -1,0 +1,60 @@
+# local environment — only the documented template belongs in Git
+.env
+.env.*
+!.env.example
+
+# أسرار wrangler المحلية وحالة D1 المحلية.
+#
+# `.dev.vars` يحمل نفس الأسرار الثلاثة التي يمنع نشرها: بلا هذا السطر يظهر
+# الملف كـ`??` فيسحبه أي `git add -A` إلى المستودع. وحالة D1 المحلية قاعدة
+# بيانات كاملة، ومنها توكنات الأجهزة المقترنة.
+.dev.vars
+.dev.vars.*
+**/.wrangler/
+
+# spike runtime
+spike/library/
+spike/sources/
+spike/pages/
+spike/xianscan-config/
+spike/.env
+
+# manga pages are reproducible fixtures via spike/probes/ — not ours to vendor
+spike/samples/
+
+node_modules/
+**/dist/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# فصل اختبار القارئ: يُولَّد بـservices/translation-worker
+spike/library/
+*.cbz
+
+# يُولَّد في النشر من آخر GitHub Release
+apps/web/version.json
+
+# قشرة أندرويد: المُولَّد من `cap sync` ومخرجات Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/app/src/main/res/xml/config.xml
+android/capacitor-cordova-android-plugins/
+dist/
+*.jks
+*.keystore
+
+# مخرجات بناء الـspike
+spike/**/build/
+spike/**/.gradle/
+spike/**/gradlew
+spike/**/gradlew.bat
+spike/**/gradle/wrapper/gradle-wrapper.jar
