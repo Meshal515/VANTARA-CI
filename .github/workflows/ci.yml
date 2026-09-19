@@ -30,6 +30,19 @@ jobs:
       TUNNEL_TOKEN: ci-unused-tunnel-token
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan public Git history for credential signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+'
+          commits="$(git rev-list --all)"
+          if [ -n "$commits" ] && git grep -nI -E -e "$pattern" $commits; then
+            echo 'Credential-like material found in public Git history.'
+            exit 1
+          fi
 
       - name: Reject tracked secret files
         shell: bash
@@ -112,6 +125,37 @@ jobs:
         env:
           DATABASE_URL: postgres://vantara:vantara-ci-password@127.0.0.1:5433/vantara
         run: pnpm --filter @vantara/db migrate
+
+      - name: Smoke boot actual API server
+        shell: bash
+        env:
+          NODE_ENV: test
+          HOST: 127.0.0.1
+          PORT: '3100'
+          DATABASE_URL: postgres://vantara:vantara-ci-password@127.0.0.1:5433/vantara
+          UCHIYOMI_URL: http://127.0.0.1:8080
+          SESSION_SECRET: ci-session-secret-ci-session-secret-1234
+          VANTARA_IDENTITY_SECRET: ci-identity-secret-ci-identity-secret-12
+          COOKIE_SECURE: 'false'
+          VANTARA_DISABLE_JOBS: 'true'
+          LOG_LEVEL: error
+        run: |
+          set -euo pipefail
+          pnpm --filter @vantara/api start >/tmp/vantara-api.log 2>&1 &
+          api_pid=$!
+          cleanup_api() { kill "$api_pid" >/dev/null 2>&1 || true; }
+          trap cleanup_api EXIT INT TERM
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3100/livez >/dev/null               && curl -fsS http://127.0.0.1:3100/healthz >/dev/null; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              cat /tmp/vantara-api.log
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Run live API integration
         env:
