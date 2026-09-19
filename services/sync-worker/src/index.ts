@@ -266,24 +266,34 @@ async function handleSync(url: URL, env: Env): Promise<Response> {
     let rows = result.results ?? [];
     let truncated = rows.length >= PAGE_SIZE;
 
-    // صفحة كاملة على rev واحد لا يمكن تجاوزها بـ`rev > cursor`: تقديم المؤشر
-    // إلى ذلك الـrev يتخطّى بقية صفوفه، وتركه يعيد نفس الصفحة إلى الأبد.
-    // وهي حالة واقعية: الطلب الواحد يأخذ rev واحدًا، ودفعة من 200 عملية
-    // ذات بثٍّ (توصية «للجميع») تكتب أكثر من ذلك في جدول واحد. فنستنزف
-    // ذلك الـrev كاملًا مرة واحدة — وهو محدود بكتابة طلب واحد.
-    if (truncated) {
-      const first = Number(rows[0]?.['rev'] ?? 0);
-      const last = Number(rows[rows.length - 1]?.['rev'] ?? 0);
-      if (first === last) {
-        const full = await env.DB.prepare(
-          `SELECT ${columns} FROM ${table} WHERE rev = ? ORDER BY rev`,
-        )
-          .bind(first)
-          .all<Record<string, unknown>>();
-        rows = full.results ?? rows;
-        // الجدول مُستنزَف حتى `first`، وقد يبقى ما هو أعلى منه
-        truncated = true;
+    // الـcursor عددي فقط، لذلك لا يجوز أن يقطع صفحة في منتصف مجموعة
+    // تشترك في rev واحد. مثال قاتل: 499 صفًا على rev=10 ثم أول صف من مئة
+    // على rev=11. لو رفعنا المؤشر إلى 11 تضيع التسعة والتسعون الباقية لأن
+    // الجولة التالية تطلب `rev > 11`.
+    //
+    // عند بلوغ السقف نستنزف **مجموعة الـrev الأخيرة كاملة** ونستبدل بها
+    // الجزء الذي وصل منها في الصفحة. هذا يعالج سواء كانت الصفحة كلها على
+    // rev واحد أو بدأت بمراجعات أقدم ثم قُطعت داخل المراجعة الأخيرة.
+    if (truncated && rows.length > 0) {
+      const lastRev = Number(rows[rows.length - 1]?.['rev'] ?? 0);
+      let boundaryStart = rows.length - 1;
+      while (
+        boundaryStart > 0 &&
+        Number(rows[boundaryStart - 1]?.['rev'] ?? 0) === lastRev
+      ) {
+        boundaryStart -= 1;
       }
+
+      const boundary = await env.DB.prepare(
+        `SELECT ${columns} FROM ${table} WHERE rev = ? ORDER BY rev`,
+      )
+        .bind(lastRev)
+        .all<Record<string, unknown>>();
+      rows = [...rows.slice(0, boundaryStart), ...(boundary.results ?? rows.slice(boundaryStart))];
+
+      // قد توجد مراجعات أعلى من lastRev؛ نبقي more=true فتُسحب في الجولة
+      // التالية. وإن لم توجد، ستكون الجولة التالية فارغة وتلحق serverRev.
+      truncated = true;
     }
 
     changes[table] = rows;
