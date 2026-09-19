@@ -208,29 +208,47 @@ export class SessionStore {
   }
 
   /**
-   * Logout حقيقي: يبطل توكن Uchiyomi الأعلى أولًا ثم يغلق مرجع VANTARA.
-   * حتى لو فشل المنبع نغلق محليًا في finally كي لا تبقى جلسة VANTARA صالحة.
+   * إغلاق جلسة الـcookie القديمة بلا كسر ربط الهوية الحديثة.
+   *
+   * مسار الربط يخزّن credential Uchiyomi طويل العمر في `vantara_identity_links`
+   * كي يستطيع Bearer v2 فتح المحتوى بلا كلمة مرور. وقد تحمل جلسة cookie التي
+   * أنشأت الربط **نفس** token_id؛ إبطاله عند خروج الكوكي يترك صف الهوية نشطًا
+   * لكنه يشير إلى credential ميت، فتتحول كل طلبات Bearer إلى 500/401.
+   *
+   * لذلك:
+   * - Bearer identity ليست جلسة قابلة للإبطال هنا؛ الجهاز يُلغى عند الـWorker
+   *   والتوكن القصير ينتهي خلال 15 دقيقة.
+   * - cookie session تُغلق محليًا دائمًا.
+   * - credential الأعلى يُلغى فقط إذا لم يعد يحمي ربط Identity نشطًا.
    */
   async logout(session: Session): Promise<void> {
-    let upstreamError: unknown;
+    if (session.identityId) return;
+
+    let revokeError: unknown;
     try {
+      let backsActiveIdentity = false;
       if (session.tokenId) {
+        const linked = await queryOne<{ active: number }>(
+          `SELECT 1 AS active
+             FROM vantara_identity_links
+            WHERE token_id = $1 AND revoked_at IS NULL
+            LIMIT 1`,
+          [session.tokenId],
+        );
+        backsActiveIdentity = linked !== undefined;
+      }
+
+      if (session.tokenId && !backsActiveIdentity) {
         await this.#options.uchiyomi.revokeToken(session.token, session.tokenId);
       }
     } catch (error) {
-      upstreamError = error;
+      // عند الشك لا نقتل credential قد يكون هو ربط الهوية الوحيد.
+      revokeError = error;
     } finally {
-      if (session.identityId) {
-        await query(
-          `UPDATE vantara_identity_links SET revoked_at = now()
-            WHERE vantara_identity_id = $1 AND revoked_at IS NULL`,
-          [session.identityId],
-        );
-      } else {
-        await this.revoke(session.id);
-      }
+      await this.revoke(session.id);
     }
-    if (upstreamError) throw upstreamError;
+
+    if (revokeError) throw revokeError;
   }
 
   async revokeAllFor(userId: string): Promise<number> {
