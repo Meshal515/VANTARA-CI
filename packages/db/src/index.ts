@@ -10,13 +10,31 @@ export interface DbConfig {
 }
 
 export function createPool(config: DbConfig): pg.Pool {
-  return new pg.Pool({
+  const created = new pg.Pool({
     connectionString: config.connectionString,
     max: config.max ?? 10,
     // الـworker والـapi كلاهما يتكلم مع نفس القاعدة؛ اتصال معلّق يخنق pg-boss
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
   });
+
+  // node-postgres يطلق خطأ الاتصالات الخاملة عبر Pool عند restart/failover.
+  // بلا listener يتحول انقطاع PostgreSQL المتوقع إلى uncaught EventEmitter
+  // error ويسقط عملية الـAPI كلها. العميل الميت يُزال من الـPool تلقائيًا؛
+  // المطلوب هنا احتواء الحدث حتى تستطيع الاستعلامات التالية إنشاء اتصال جديد.
+  created.on('error', (error) => {
+    const code =
+      typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+    console.error(
+      '[db] idle PostgreSQL client disconnected',
+      code ? `code=${code}` : '',
+      error instanceof Error ? error.message : String(error),
+    );
+  });
+
+  return created;
 }
 
 /** المسبح المشترك للعملية. يُهيّأ مرة واحدة عند الإقلاع. */
