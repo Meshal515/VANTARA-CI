@@ -1,0 +1,41 @@
+# مسار بلا بناء.
+#
+# سببه صريح: صورة `api` لم يُتحقق من بنائها (القرص والشبكة في بيئة كتابتها
+# منعا ذلك). هذا الملف يشغّل نفس الكود من المصدر داخل صورة Node رسمية، فلا
+# خطوة بناء تفشل عند أول تشغيل.
+#
+#   docker compose -f infra/docker-compose.yml \
+#                  -f infra/docker-compose.nobuild.yml up -d
+#
+# الفرق الوحيد: التبعيات تُثبَّت عند الإقلاع الأول (‏~30 ثانية) في مجلد داخل
+# الحاوية، والكود يُقرأ من قرصك — فأي تعديل يظهر بإعادة تشغيل الحاوية.
+
+name: vantara
+
+services:
+  api:
+    # يتجاوز `build` من الملف الأساسي
+    build: !reset null
+    image: ${NODE_IMAGE:-node:22-alpine}
+    working_dir: /repo
+    # `pnpm install --prod` يرفض العمل بلا TTY بدون هذا
+    environment:
+      CI: 'true'
+    command:
+      - sh
+      - -lc
+      - |
+        set -e
+        corepack enable
+        pnpm install --frozen-lockfile
+        node --experimental-strip-types packages/db/src/migrate.ts
+        exec node --experimental-strip-types apps/api/src/server.ts
+    volumes:
+      # المستودع للقراءة: الحاوية لا تعدّل كودك
+      - ..:/repo:ro
+      # node_modules في volume: لا تُكتب في مستودعك، ولا تُفقد مع كل تشغيل
+      - api_node_modules:/repo/node_modules
+      - api_uploads:/data/uploads
+
+volumes:
+  api_node_modules:

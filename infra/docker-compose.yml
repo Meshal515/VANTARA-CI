@@ -1,0 +1,277 @@
+# VANTARA — المكدّس الكامل.
+#
+# كل صورة مثبّتة بإصدار أو digest؛ `latest` ليس تثبيتًا، وترقية صامتة في
+# منتصف الشهر هي آخر ما نحتاجه.
+#
+#   cp .env.example .env    # واضبط SESSION_SECRET وPOSTGRES_PASSWORD
+#   docker compose -f infra/docker-compose.yml up -d
+#
+# الـdigests والإصدارات مُتحقَّقة في docs/UPSTREAMS.md. عند الترقية: حدّث
+# المرجع عمدًا وشغّل اختبارات الإقلاع قبل اعتماده.
+
+name: vantara
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  # ─────────────────────────── قاعدة البيانات ───────────────────────────
+  # خارجية بقرار (D-06): جداول VANTARA وpg-boss يجب أن تكون في قاعدة لا
+  # نستبدلها مع كل `docker compose pull` للتطبيق.
+  postgres:
+    <<: *restart
+    image: postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vantara}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-vantara}
+      UCHIYOMI_DB: ${UCHIYOMI_DB:-uchiyomi}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # الـentrypoint الرسمي يشغّل Postgres مؤقتًا على Unix socket فقط أثناء init.
+      # TCP يثبت أن السيرفر النهائي اشتغل، فلا تبدأ الخدمات في نافذة shutdown.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-vantara} -d ${POSTGRES_DB:-vantara}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [vantara]
+
+  # ────────────────────────── النظام الأساسي ──────────────────────────
+  uchiyomi:
+    <<: *restart
+    image: ghcr.io/angelosha/uchiyomi@sha256:781c5cf723d9d6fca2abf1314eb76e94793a5b777fdfdfe4066235ce7cb1aadd
+    depends_on:
+      postgres: { condition: service_healthy }
+    # يُنهي الفصل الذي يكتبه على SIGTERM؛ مهلة Docker الافتراضية 10 ث تقطعه
+    stop_grace_period: 40s
+    environment:
+      PUID: ${PUID:-}
+      PGID: ${PGID:-}
+      NODE_ENV: production
+      PORT: '3000'
+      # قاعدة خارجية: ضبط هذا يمنع تشغيل Postgres المدمج داخل الحاوية
+      DATABASE_URL: postgres://${POSTGRES_USER:-vantara}:${POSTGRES_PASSWORD}@postgres:5432/${UCHIYOMI_DB:-uchiyomi}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}
+      FLARESOLVERR_URL: http://flaresolverr:8191
+      SUWAYOMI_URL: http://suwayomi:4567
+      # الافتراضي 25، وعدد الإضافات العربية وحدها 38
+      SUWAYOMI_MAX_SOURCES: ${SUWAYOMI_MAX_SOURCES:-60}
+      SUWAYOMI_PAGE_CONCURRENCY: ${SUWAYOMI_PAGE_CONCURRENCY:-4}
+      SOURCES_DIR: /sources
+      CUSTOM_SITES_FILE: /config/sites.json
+      JWT_SECRET: ${UCHIYOMI_JWT_SECRET:-}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    volumes:
+      - ${LIBRARY_PATH:-./library}:/library
+      - uchiyomi_downloads:/library-dl
+      - uchiyomi_config:/config
+      - uchiyomi_cache:/cache
+      - uchiyomi_backups:/backups
+    healthcheck:
+      # Uchiyomi نفسه Node service، فلا نعتمد على وجود curl/wget داخل الصورة.
+      test: ['CMD-SHELL', 'node -e "fetch(\"http://127.0.0.1:3000/livez\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 45s
+    networks: [vantara]
+    expose: ['3000']
+
+  # محرك الإضافات. مدمج مع Uchiyomi upstream — لا نشغّل نسخة ثانية (D-01).
+  suwayomi:
+    <<: *restart
+    image: ghcr.io/suwayomi/suwayomi-server@sha256:e59f212ccf91b26de8676a063a2db90256c148c6261535c7c477d47a43d9751b
+    environment:
+      TZ: ${TZ:-UTC}
+      # Uchiyomi يملك المكتبة والتنزيل؛ هذه النسخة لا تكتب فيها أبدًا
+      AUTO_DOWNLOAD_CHAPTERS: 'false'
+      DOWNLOAD_AS_CBZ: 'true'
+    volumes:
+      - suwayomi_data:/home/suwayomi/.local/share/Tachidesk
+    healthcheck:
+      # الصورة فيها bash بلا curl؛ 401 يُحتسب حيًّا (المحرك يعمل والمصادقة مفعّلة)
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/4567;
+          printf 'GET /api/v1/settings/about HTTP/1.0\r\n\r\n' >&3;
+          head -1 <&3 | grep -qE ' (200|401) '
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks: [vantara]
+    expose: ['4567']
+
+  # إلزامي لا اختياري: أثبت الـspike أن الفصول تفشل بدونه على مصادر Cloudflare
+  # بخطأ `Cloudflare bypass currently disabled`، مع نجاح البحث — فحص يكتفي
+  # بالبحث يمرّ كذبًا.
+  flaresolverr:
+    <<: *restart
+    image: ghcr.io/flaresolverr/flaresolverr@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767
+    shm_size: 1gb
+    mem_limit: 2g
+    environment:
+      LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-warning}
+    healthcheck:
+      test: ['CMD-SHELL', "curl -fsS http://127.0.0.1:8191/ | grep -q 'FlareSolverr is ready' || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks: [vantara]
+    expose: ['8191']
+
+  # ──────────────────────────── طبقة VANTARA ────────────────────────────
+  api:
+    <<: *restart
+    build:
+      context: ..
+      dockerfile: infra/api.Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+      uchiyomi: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      PORT: '3100'
+      DATABASE_URL: postgres://${POSTGRES_USER:-vantara}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vantara}
+      UCHIYOMI_URL: http://uchiyomi:3000
+      # توكن الخدمة (docs/DEPLOY.md § 2). بلا هذا يرجع مسار الصور الموقَّع
+      # ‏503 ويسقط القارئ إلى مسار الكوكي — وهو لا يعمل على الـAPK.
+      UCHIYOMI_SERVICE_TOKEN: ${UCHIYOMI_SERVICE_TOKEN:-}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET (openssl rand -base64 48)}
+      VANTARA_IDENTITY_SECRET: ${VANTARA_IDENTITY_SECRET:?set VANTARA_IDENTITY_SECRET (openssl rand -base64 48)}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-60}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # أصول الـAPK مدمجة في القائمة البيضاء؛ هذا لنطاق Pages وحده
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      UPLOAD_DIR: /data/uploads
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - api_uploads:/data/uploads
+    healthcheck:
+      test: ['CMD-SHELL', 'node -e "fetch(\"http://127.0.0.1:3100/healthz\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks: [vantara]
+    expose: ['3100']
+
+  # ───────────────────────── الترجمة العربية ─────────────────────────
+  translation-worker:
+    <<: *restart
+    build:
+      context: ..
+      dockerfile: infra/worker.Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-vantara}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vantara}
+      UCHIYOMI_URL: http://uchiyomi:3000
+      ARABIC_FONT: /fonts/NotoNaskhArabic-Regular.ttf
+      LATIN_FONT: /fonts/NotoSans-Regular.ttf
+      REQUIRE_RAQM: 'true'
+      TRANSLATION_CONCURRENCY: ${TRANSLATION_CONCURRENCY:-1}
+    volumes:
+      - translations:/data/translations
+      - worker_models:/models
+    networks: [vantara]
+    profiles: [translation]
+
+  # ────────────────────────────── الوصول ──────────────────────────────
+  cloudflared:
+    <<: *restart
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.9.1}
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN}
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [vantara]
+    profiles: [public]
+
+  # ───────────────────────────── اختيارية ─────────────────────────────
+  uptime-kuma:
+    <<: *restart
+    image: ${UPTIME_KUMA_IMAGE:-louislam/uptime-kuma:2.5.5}
+    volumes:
+      - kuma_data:/app/data
+    networks: [vantara]
+    ports: ['${KUMA_PORT:-3001}:3001']
+    profiles: [monitoring]
+
+  ntfy:
+    <<: *restart
+    image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.28.0}
+    command: serve
+    environment:
+      NTFY_BASE_URL: ${NTFY_BASE_URL:-http://localhost:8090}
+      NTFY_CACHE_FILE: /var/cache/ntfy/cache.db
+    volumes:
+      - ntfy_cache:/var/cache/ntfy
+    networks: [vantara]
+    ports: ['${NTFY_PORT:-8090}:80']
+    profiles: [monitoring]
+
+  # نسخ منطقي لقاعدتي VANTARA وUchiyomi. لا ننسخ data directory وهي حيّة؛
+  # pg_dump يعطي snapshot متسق ويمكن التحقق منه بـpg_restore --list.
+  db-backup:
+    image: postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGUSER: ${POSTGRES_USER:-vantara}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-vantara}
+      UCHIYOMI_DB: ${UCHIYOMI_DB:-uchiyomi}
+      BACKUP_DIR: /backups/postgres
+    entrypoint: ['/bin/sh', '-c']
+    command: ['echo "run: docker compose run --rm db-backup sh /scripts/backup-postgres.sh" && sleep infinity']
+    volumes:
+      - backups:/backups
+      - ./backup-postgres.sh:/scripts/backup-postgres.sh:ro
+      - ./restore-postgres.sh:/scripts/restore-postgres.sh:ro
+    networks: [vantara]
+    profiles: [backup]
+
+  # Restic يشفّر مجلد النسخ المنطقية وما يلزم من ملفات التشغيل؛ لا يقرأ
+  # postgres_data مباشرة.
+  backup:
+    image: ${RESTIC_IMAGE:-restic/restic:0.19.1}
+    entrypoint: ['/bin/sh', '-c']
+    command: ['echo "run: docker compose run --rm backup \"restic ...\"" && sleep infinity']
+    environment:
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-/backups/restic}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-}
+    volumes:
+      - backups:/backups
+      # مرفقات البلاغات بيانات مستخدم غير قابلة لإعادة البناء، فتدخل snapshot.
+      # قراءة فقط هنا: خدمة النسخ لا تحتاج حق تعديل الملفات الأصلية.
+      - api_uploads:/source/api-uploads:ro
+    networks: [vantara]
+    profiles: [backup]
+
+networks:
+  vantara:
+
+volumes:
+  postgres_data:
+  uchiyomi_downloads:
+  uchiyomi_config:
+  uchiyomi_cache:
+  uchiyomi_backups:
+  suwayomi_data:
+  api_uploads:
+  translations:
+  worker_models:
+  kuma_data:
+  ntfy_cache:
+  backups:
