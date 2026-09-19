@@ -14,12 +14,15 @@ export interface Session {
   username: string;
   /** توكن Uchiyomi بعد فكّ التشفير. لا يُسجَّل ولا يُعاد إلى العميل. */
   token: string;
+  /** معرّف التوكن الأعلى، مطلوب لإبطاله عند logout. */
+  tokenId?: string;
 }
 
 interface SessionRow {
   id: string;
   uchiyomi_user_id: string;
   token_encrypted: string;
+  token_id: string | null;
   username: string;
 }
 
@@ -27,6 +30,7 @@ interface IdentityLinkRow {
   vantara_identity_id: string;
   uchiyomi_user_id: string;
   token_encrypted: string;
+  token_id: string | null;
   username: string;
 }
 
@@ -110,13 +114,14 @@ export class SessionStore {
       userId: result.user.id,
       username: result.user.username,
       token: minted.token,
+      tokenId: minted.id,
     };
   }
 
   /** يُرجع undefined للجلسة المنتهية أو المُبطلة أو غير الموجودة — بلا تمييز. */
   async resolve(sessionId: string): Promise<Session | undefined> {
     const row = await queryOne<SessionRow>(
-      `SELECT s.id, s.uchiyomi_user_id, s.token_encrypted, u.username
+      `SELECT s.id, s.uchiyomi_user_id, s.token_encrypted, s.token_id, u.username
          FROM vantara_sessions s
          JOIN vantara_users u USING (uchiyomi_user_id)
         WHERE s.id = $1
@@ -134,7 +139,13 @@ export class SessionStore {
       return undefined;
     }
 
-    return { id: row.id, userId: row.uchiyomi_user_id, username: row.username, token };
+    return {
+      id: row.id,
+      userId: row.uchiyomi_user_id,
+      username: row.username,
+      token,
+      ...(row.token_id ? { tokenId: row.token_id } : {}),
+    };
   }
 
   /**
@@ -143,7 +154,7 @@ export class SessionStore {
    */
   async resolveIdentity(identityId: string, deviceId: string): Promise<Session | undefined> {
     const row = await queryOne<IdentityLinkRow>(
-      `SELECT l.vantara_identity_id, l.uchiyomi_user_id, l.token_encrypted, u.username
+      `SELECT l.vantara_identity_id, l.uchiyomi_user_id, l.token_encrypted, l.token_id, u.username
          FROM vantara_identity_links l
          JOIN vantara_users u USING (uchiyomi_user_id)
         WHERE l.vantara_identity_id = $1 AND l.revoked_at IS NULL`,
@@ -175,6 +186,7 @@ export class SessionStore {
       userId: row.uchiyomi_user_id,
       username: row.username,
       token,
+      ...(row.token_id ? { tokenId: row.token_id } : {}),
     };
   }
 
@@ -193,6 +205,32 @@ export class SessionStore {
         WHERE id = $1 AND revoked_at IS NULL`,
       [sessionId],
     );
+  }
+
+  /**
+   * Logout حقيقي: يبطل توكن Uchiyomi الأعلى أولًا ثم يغلق مرجع VANTARA.
+   * حتى لو فشل المنبع نغلق محليًا في finally كي لا تبقى جلسة VANTARA صالحة.
+   */
+  async logout(session: Session): Promise<void> {
+    let upstreamError: unknown;
+    try {
+      if (session.tokenId) {
+        await this.#options.uchiyomi.revokeToken(session.token, session.tokenId);
+      }
+    } catch (error) {
+      upstreamError = error;
+    } finally {
+      if (session.identityId) {
+        await query(
+          `UPDATE vantara_identity_links SET revoked_at = now()
+            WHERE vantara_identity_id = $1 AND revoked_at IS NULL`,
+          [session.identityId],
+        );
+      } else {
+        await this.revoke(session.id);
+      }
+    }
+    if (upstreamError) throw upstreamError;
   }
 
   async revokeAllFor(userId: string): Promise<number> {

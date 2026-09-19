@@ -14,6 +14,7 @@ import { closePool, initPool, query } from '@vantara/db';
 import { buildApp } from './app.ts';
 import { loadConfig } from './lib/config.ts';
 import { SESSION_COOKIE } from './lib/context.ts';
+import { decrypt, deriveKey } from './lib/crypto.ts';
 
 const DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgres://vantara:vantara_dev@127.0.0.1:5433/vantara';
@@ -21,6 +22,7 @@ const UCHIYOMI_URL = process.env['UCHIYOMI_URL'] ?? 'http://127.0.0.1:8080';
 const USERNAME = process.env['TEST_USERNAME'] ?? 'mishal';
 // لا كلمة مرور افتراضية في الكود: أي قيمة هنا تصبح سرًّا منشورًا في المستودع
 const PASSWORD = process.env['TEST_PASSWORD'];
+const TEST_SESSION_SECRET = 'test-secret-that-is-at-least-32-chars-long';
 const REQUIRE_LIVE_INTEGRATION = process.env['VANTARA_REQUIRE_LIVE_INTEGRATION'] === 'true';
 
 let app: FastifyInstance;
@@ -57,7 +59,7 @@ beforeAll(async () => {
     NODE_ENV: 'test',
     DATABASE_URL,
     UCHIYOMI_URL,
-    SESSION_SECRET: 'test-secret-that-is-at-least-32-chars-long',
+    SESSION_SECRET: TEST_SESSION_SECRET,
     VANTARA_IDENTITY_SECRET: 'test-identity-secret-that-is-at-least-32-chars',
     COOKIE_SECURE: 'false',
     LOG_LEVEL: 'error',
@@ -427,13 +429,36 @@ describe('deleted works', () => {
 });
 
 describe('logout', () => {
-  it('invalidates the session server-side', async () => {
+  it('revokes both the VANTARA session and its upstream Uchiyomi token', async () => {
     if (skipUnlessSession()) return;
+
+    const sessionId = cookie.slice(`${SESSION_COOKIE}=`.length);
+    const rows = await query<{ token_encrypted: string; token_id: string | null }>(
+      `SELECT token_encrypted, token_id FROM vantara_sessions WHERE id = $1`,
+      [sessionId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.token_id).toBeTruthy();
+
+    const upstreamToken = decrypt(
+      rows[0]!.token_encrypted,
+      deriveKey(TEST_SESSION_SECRET, 'session-token'),
+    );
+
+    const beforeUpstream = await fetch(`${UCHIYOMI_URL}/auth/me`, {
+      headers: { authorization: `Bearer ${upstreamToken}` },
+    });
+    expect(beforeUpstream.status).toBe(200);
 
     const out = await app.inject({ method: 'POST', url: '/v1/auth/logout', headers: { cookie } });
     expect(out.statusCode).toBe(204);
 
     const after = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: { cookie } });
     expect(after.statusCode).toBe(401);
+
+    const afterUpstream = await fetch(`${UCHIYOMI_URL}/auth/me`, {
+      headers: { authorization: `Bearer ${upstreamToken}` },
+    });
+    expect(afterUpstream.status).toBe(401);
   });
 });

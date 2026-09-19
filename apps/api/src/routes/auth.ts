@@ -76,7 +76,14 @@ export async function authRoutes(app: FastifyInstance, ctx: AppContext): Promise
   );
 
   app.post('/v1/auth/logout', { preHandler: requireSession(ctx) }, async (request, reply) => {
-    await ctx.sessions.revoke(sessionOf(request).id);
+    const session = sessionOf(request);
+    try {
+      await ctx.sessions.logout(session);
+    } catch (err) {
+      request.log.error({ err }, 'upstream token revoke failed during logout');
+      void reply.clearCookie(SESSION_COOKIE, { path: '/' });
+      return reply.code(502).send({ error: 'upstream_unavailable' });
+    }
     void reply.clearCookie(SESSION_COOKIE, { path: '/' });
     return reply.code(204).send();
   });
