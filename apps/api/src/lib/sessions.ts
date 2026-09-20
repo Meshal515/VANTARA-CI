@@ -240,13 +240,56 @@ export class SessionStore {
   }
 
   async revokeAllFor(userId: string): Promise<number> {
-    const rows = await query<{ id: string }>(
-      `UPDATE vantara_sessions SET revoked_at = now()
-        WHERE uchiyomi_user_id = $1 AND revoked_at IS NULL
-        RETURNING id`,
+    const sessions = await query<{
+      id: string;
+      token_encrypted: string;
+      token_id: string | null;
+    }>(
+      `SELECT id, token_encrypted, token_id
+         FROM vantara_sessions
+        WHERE uchiyomi_user_id = $1
+          AND revoked_at IS NULL`,
       [userId],
     );
-    return rows.length;
+
+    // بعض جلسات cookie قد تحمل نفس credential الذي يحمي Identity v2.
+    // هذا credential لا يُلغى هنا؛ Worker يملك logout-all للأجهزة الحديثة.
+    const linked = await query<{ token_id: string }>(
+      `SELECT token_id
+         FROM vantara_identity_links
+        WHERE uchiyomi_user_id = $1
+          AND revoked_at IS NULL
+          AND token_id IS NOT NULL`,
+      [userId],
+    );
+    const protectedIds = new Set(linked.map((row) => row.token_id));
+    const attempted = new Set<string>();
+    let revokeError: unknown;
+
+    try {
+      for (const session of sessions) {
+        const tokenId = session.token_id;
+        if (!tokenId || protectedIds.has(tokenId) || attempted.has(tokenId)) continue;
+        attempted.add(tokenId);
+
+        try {
+          const token = decrypt(session.token_encrypted, this.#options.key);
+          await this.#options.uchiyomi.revokeToken(token, tokenId);
+        } catch (error) {
+          // نكمل تنظيف بقية credentials ولا نترك جلسة محلية حية بسبب فشل واحد.
+          revokeError ??= error;
+        }
+      }
+    } finally {
+      await query(
+        `UPDATE vantara_sessions SET revoked_at = now()
+          WHERE uchiyomi_user_id = $1 AND revoked_at IS NULL`,
+        [userId],
+      );
+    }
+
+    if (revokeError) throw revokeError;
+    return sessions.length;
   }
 
   /** تنظيف دوري. الجلسة المنتهية تبقى صفًا ميتًا حتى تُحذف. */
