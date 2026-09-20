@@ -269,8 +269,9 @@ describe('data ownership freeze', () => {
       headers: { cookie },
       payload: {},
     });
-    // 404 لأن اللقطة غير موجودة، أو 403 لغير المشرف — المهم أن المسار موجود
-    expect([403, 404]).toContain(split.statusCode);
+    // D-03: لا نعلن split ناجحًا بلا استعادة ذرّية عند المالكين.
+    // غير المشرف يُرفض، والمشرف يرى أن الاستعادة غير متاحة بدل نجاح مزيف.
+    expect([403, 409]).toContain(split.statusCode);
   });
 });
 
