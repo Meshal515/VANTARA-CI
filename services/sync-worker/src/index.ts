@@ -250,15 +250,57 @@ async function handleSync(url: URL, env: Env, userId: string): Promise<Response>
     return json({ protocol: SYNC_PROTOCOL, reset: true, cursor: 0, serverRev, changes: {} });
   }
 
-  // بعض الجداول ملك الحساب نفسه ولا يجوز أن تغادر إلى جهاز صديق.
-  // فلترة الواجهة ليست حماية: إن وصل الصف إلى المرآة المحلية فقد كُشف أصلًا.
-  const selfScoped = (table: string) => table === 'settings' || table === 'notifications';
+  // الفروقات نفسها حدّ أمان، لا مجرد transport. الصف الذي لا يحتاجه
+  // هذا الحساب لا يصل إلى مرآته المحلية أصلًا؛ إخفاؤه في الواجهة بعد التنزيل
+  // يعني أن البيانات كُشفت بالفعل.
+  const deltaScope = (table: string): { sql: string; values: string[] } => {
+    switch (table) {
+      case 'library':
+      case 'progress':
+      case 'collections':
+      case 'settings':
+      case 'notifications':
+        return { sql: ' AND user_id = ?', values: [userId] };
+
+      // المستلم يرى حالته فقط، والمرسل يحتاج حالات كل من أرسل إليهم.
+      case 'recommendation_recipients':
+        return {
+          sql: ' AND (user_id = ? OR recommendation_id IN (SELECT id FROM recommendations WHERE from_id = ?))',
+          values: [userId, userId],
+        };
+
+      // التوصية الموجّهة لا تخص الصديق الثالث. broadcast (to_id IS NULL)
+      // اجتماعية للجميع، والمرسل يرى دائمًا ما أرسله.
+      case 'recommendations':
+        return {
+          sql: ' AND (from_id = ? OR to_id IS NULL OR to_id = ?)',
+          values: [userId, userId],
+        };
+
+      // النشاط الموجّه (رد/تفاعل/توصية لشخص) للفاعل والهدف فقط.
+      case 'activity':
+        return {
+          sql: ' AND (actor_id = ? OR target_user_id IS NULL OR target_user_id = ?)',
+          values: [userId, userId],
+        };
+
+      // المشاهد يرى إيصالاته، والفاعل يرى إيصالات حدثه لعرض delivered/seen.
+      case 'activity_receipts':
+        return {
+          sql: ' AND (user_id = ? OR event_id IN (SELECT id FROM activity WHERE actor_id = ?))',
+          values: [userId, userId],
+        };
+
+      default:
+        return { sql: '', values: [] };
+    }
+  };
 
   const statements = DELTA_TABLES.map(([table, columns]) => {
-    const statement = env.DB.prepare(
-      `SELECT ${columns} FROM ${table} WHERE rev > ?${selfScoped(table) ? ' AND user_id = ?' : ''} ORDER BY rev LIMIT ${PAGE_SIZE}`,
-    );
-    return selfScoped(table) ? statement.bind(cursor, userId) : statement.bind(cursor);
+    const scope = deltaScope(table);
+    return env.DB.prepare(
+      `SELECT ${columns} FROM ${table} WHERE rev > ?${scope.sql} ORDER BY rev LIMIT ${PAGE_SIZE}`,
+    ).bind(cursor, ...scope.values);
   });
   const results = await env.DB.batch<Record<string, unknown>>(statements);
 
@@ -289,12 +331,13 @@ async function handleSync(url: URL, env: Env, userId: string): Promise<Response>
         boundaryStart -= 1;
       }
 
+      const scope = deltaScope(table);
       const boundaryStatement = env.DB.prepare(
-        `SELECT ${columns} FROM ${table} WHERE rev = ?${selfScoped(table) ? ' AND user_id = ?' : ''} ORDER BY rev`,
+        `SELECT ${columns} FROM ${table} WHERE rev = ?${scope.sql} ORDER BY rev`,
       );
-      const boundary = await (
-        selfScoped(table) ? boundaryStatement.bind(lastRev, userId) : boundaryStatement.bind(lastRev)
-      ).all<Record<string, unknown>>();
+      const boundary = await boundaryStatement
+        .bind(lastRev, ...scope.values)
+        .all<Record<string, unknown>>();
       rows = [...rows.slice(0, boundaryStart), ...(boundary.results ?? rows.slice(boundaryStart))];
 
       // قد توجد مراجعات أعلى من lastRev؛ نبقي more=true فتُسحب في الجولة
@@ -452,6 +495,8 @@ function socialActivityStatements(
   const viewers = notificationTargets({
     accounts: input.accounts,
     actorId: input.actorId,
+    // نشاط موجّه لشخص واحد لا يُنشئ receipts للصديق الثالث.
+    to: input.targetUserId ?? null,
   });
   for (const viewer of viewers) {
     statements.push(
