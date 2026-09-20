@@ -1,3 +1,5 @@
+import { createHmac, randomBytes } from 'node:crypto';
+
 /**
  * تحقّق ما بعد النشر، على D1 الحقيقية.
  *
@@ -12,14 +14,18 @@
  * بمفتاح فصل لا يوجد في أي مصدر.
  */
 
-const BASE = (process.argv[2] ?? '').replace(/\/+$/, '');
-if (!BASE) {
-  console.error('usage: node verify.mjs <worker-url>');
+const CLEANUP_ONLY = process.argv[2] === '--cleanup-only';
+const BASE = CLEANUP_ONLY ? '' : (process.argv[2] ?? '').replace(/\/+$/, '');
+if (!CLEANUP_ONLY && !BASE) {
+  console.error('usage: node verify.mjs <worker-url> | --cleanup-only');
   process.exit(2);
 }
 
-// دحمي. ثابت في هجرة 0002، فلا يُستنتج من ترتيب.
-const USER_ID = '07588797-a471-44d1-99ce-7fb4f188c196';
+// حساب مؤقت مخصّص للتحقق. لا نلمس حسابات المستخدمين الثلاثة.
+const USER_ID = '00000000-0000-4000-8000-00000000b011';
+const USERNAME = '__verify__';
+const DEVICE_ONE = '__verify__-device-one';
+const DEVICE_TWO = '__verify__-device-two';
 const CHAPTER = '__verify__/ch-1';
 const SERIES = '__verify__/series';
 
@@ -48,22 +54,122 @@ async function call(path, options = {}, token = null) {
   return { status: response.status, json, text };
 }
 
+
+function requiredEnv(name) {
+  const value = process.env[name];
+  if (!value) throw new Error(`missing ${name} for live D1 verification`);
+  return value;
+}
+
+async function d1Query(sql, params = []) {
+  const apiToken = requiredEnv('CLOUDFLARE_API_TOKEN');
+  const account = requiredEnv('CLOUDFLARE_ACCOUNT_ID');
+  const database = requiredEnv('D1_DATABASE_ID');
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${database}/query`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ sql, params }),
+      signal: AbortSignal.timeout(20_000),
+    },
+  );
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || payload?.success !== true) {
+    throw new Error(`D1 verify query failed (${response.status}): ${JSON.stringify(payload)}`);
+  }
+  return payload;
+}
+
+function randomSecret(label) {
+  return `__verify__-${label}-${randomBytes(24).toString('hex')}`;
+}
+
+function pairingHash(token) {
+  return createHmac('sha256', requiredEnv('VANTARA_DEVICE_PEPPER')).update(token).digest('hex');
+}
+
+async function seedVerifierAccount() {
+  const now = Date.now();
+  await d1Query(
+    'INSERT INTO accounts (user_id, username, created_at, rev) VALUES (?, ?, ?, 0)',
+    [USER_ID, USERNAME, now],
+  );
+  await d1Query(
+    'INSERT INTO profiles (user_id, display_name, field_revs, rev) VALUES (?, ?, ?, 0)',
+    [USER_ID, 'VANTARA Verify', '{}'],
+  );
+  await d1Query(
+    "INSERT INTO presence (user_id, status, beat_at) VALUES (?, 'OFFLINE', 0)",
+    [USER_ID],
+  );
+  await d1Query(
+    'INSERT INTO settings (user_id, data, field_revs, rev) VALUES (?, ?, ?, 0)',
+    [USER_ID, '{}', '{}'],
+  );
+}
+
+async function pairVerifierDevice(deviceId, deviceCredential) {
+  const token = randomSecret('pair');
+  const now = Date.now();
+  await d1Query(
+    `INSERT INTO pairing_tokens
+       (token_hash, user_id, expires_at, consumed_at, created_at)
+     VALUES (?, ?, ?, NULL, ?)`,
+    [pairingHash(token), USER_ID, now + 5 * 60_000, now],
+  );
+  return call('/v1/device/pair', {
+    method: 'POST',
+    body: { deviceId, deviceCredential, pairingToken: token },
+  });
+}
+
+async function cleanup() {
+  // idempotent: يُستدعى قبل الفحص وبعده، ويزيل بقايا Run انقطع سابقًا.
+  await d1Query("DELETE FROM notifications WHERE id LIKE '__verify__%'");
+  await d1Query("DELETE FROM applied_ops WHERE user_id = ? OR op_id LIKE '__verify__%'", [USER_ID]);
+  await d1Query("DELETE FROM works WHERE series_ref LIKE '__verify__%'");
+  await d1Query('DELETE FROM pairing_tokens WHERE user_id = ?', [USER_ID]);
+  await d1Query('DELETE FROM accounts WHERE user_id = ? OR username = ?', [USER_ID, USERNAME]);
+}
+
 function rowsOf(payload, table) {
   return payload?.changes?.[table] ?? [];
 }
 
 async function main() {
-  // ─── الدخول بلا كلمة مرور ───
-  const session = await call('/v1/session', { method: 'POST', body: { userId: USER_ID } });
-  check('الدخول باختيار الحساب وحده', session.status === 200 && Boolean(session.json?.token));
-  const token = session.json?.token;
-  if (!token) {
-    console.error(session.text);
-    process.exit(1);
-  }
+  // ─── B2: جهاز موثوق حقيقي على D1 ───
+  await seedVerifierAccount();
 
-  const unknown = await call('/v1/session', { method: 'POST', body: { userId: 'not-an-account' } });
-  check('حساب غير معروف يُرفض', unknown.status === 404);
+  const legacy = await call('/v1/session', { method: 'POST', body: { userId: USER_ID } });
+  check(
+    'userId وحده لم يعد إثبات هوية',
+    legacy.status === 401 && legacy.json?.error === 'device_proof_required',
+  );
+
+  const credentialOne = randomSecret('device-one');
+  const credentialTwo = randomSecret('device-two');
+
+  const pairedOne = await pairVerifierDevice(DEVICE_ONE, credentialOne);
+  const pairedTwo = await pairVerifierDevice(DEVICE_TWO, credentialTwo);
+  check('الجهاز الأول اقترن', pairedOne.status === 200 && pairedOne.json?.paired === true);
+  check('الجهاز الثاني اقترن', pairedTwo.status === 200 && pairedTwo.json?.paired === true);
+
+  const session = await call('/v1/session', {
+    method: 'POST',
+    body: { userId: USER_ID, deviceId: DEVICE_ONE, deviceCredential: credentialOne },
+  });
+  const secondSession = await call('/v1/session', {
+    method: 'POST',
+    body: { userId: USER_ID, deviceId: DEVICE_TWO, deviceCredential: credentialTwo },
+  });
+  check('الجهاز الأول يصدر access token v2', session.status === 200 && Boolean(session.json?.token));
+  check('الجهاز الثاني يصدر access token v2', secondSession.status === 200 && Boolean(secondSession.json?.token));
+  const token = session.json?.token;
+  if (!token) throw new Error(`trusted-device session failed: ${session.text}`);
 
   const noToken = await call('/v1/sync');
   check('السحب بلا توكن يُرفض', noToken.status === 401);
@@ -378,35 +484,33 @@ async function main() {
   check('user_id لم يتغير بتعديل وارد', Boolean(dahmi), `userId=${dahmi?.userId}`);
   check('الاسم بقي قابلًا للتعديل', dahmi?.displayName === 'دحمي', `name=${dahmi?.displayName}`);
 
-  await cleanup();
+  // ─── logout-all يقتل كل الأجهزة الموثوقة للحساب ───
+  const logoutAll = await call('/v1/device/logout-all', { method: 'POST' }, token);
+  check('logout-all ألغى الجهازين', logoutAll.status === 200 && Number(logoutAll.json?.revoked ?? 0) >= 2);
+
+  const firstRetry = await call('/v1/session', {
+    method: 'POST',
+    body: { userId: USER_ID, deviceId: DEVICE_ONE, deviceCredential: credentialOne },
+  });
+  const secondRetry = await call('/v1/session', {
+    method: 'POST',
+    body: { userId: USER_ID, deviceId: DEVICE_TWO, deviceCredential: credentialTwo },
+  });
+  check('الجهاز الأول لا يستطيع تجديد الجلسة بعد logout-all', firstRetry.status === 401);
+  check('الجهاز الثاني لا يستطيع تجديد الجلسة بعد logout-all', secondRetry.status === 401);
 
   console.log(`\n${failures.length === 0 ? 'كل الفحوص نجحت' : `فشل ${failures.length}`}`);
-  process.exit(failures.length === 0 ? 0 : 1);
+  if (failures.length > 0) process.exitCode = 1;
 }
 
-/** يحذف صفوف الفحص عبر واجهة D1 مباشرة (الـWorker لا يملك مسار حذف). */
-async function cleanup() {
-  const token = process.env.CLOUDFLARE_API_TOKEN;
-  const account = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const database = process.env.D1_DATABASE_ID;
-  if (!token || !account || !database) {
-    console.log('— تنظيف متخطّى (بلا وصول إلى D1). صفوف __verify__ باقية.');
-    return;
+if (CLEANUP_ONLY) {
+  await cleanup();
+  console.log('— fixtures التحقق القديمة حُذفت');
+} else {
+  await cleanup();
+  try {
+    await main();
+  } finally {
+    await cleanup();
   }
-  const sql = [
-    "DELETE FROM chapter_reads WHERE chapter_key LIKE '__verify__%'",
-    "DELETE FROM progress WHERE chapter_key LIKE '__verify__%'",
-    "DELETE FROM applied_ops WHERE op_id LIKE '__verify__%'",
-  ].join('; ');
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${database}/query`,
-    {
-      method: 'POST',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ sql }),
-    },
-  );
-  console.log(response.ok ? '— صفوف الفحص حُذفت' : `— تعذّر التنظيف (${response.status})`);
 }
-
-await main();

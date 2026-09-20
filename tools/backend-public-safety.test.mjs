@@ -132,3 +132,15 @@ test('D1 migration numbers are unique, ordered, and include the top collection c
   }
   assert.ok(files.includes('0011_top_collection.sql'));
 });
+
+
+test('live D1 verifier exercises trusted-device v2 without touching real accounts', () => {
+  const verify = readText('services/sync-worker/verify.mjs');
+  assert.match(verify, /USERNAME = '__verify__'/);
+  assert.match(verify, /\/v1\/device\/pair/);
+  assert.match(verify, /deviceCredential/);
+  assert.match(verify, /device_proof_required/);
+  assert.match(verify, /\/v1\/device\/logout-all/);
+  assert.match(verify, /--cleanup-only/);
+  assert.match(verify, /DELETE FROM accounts WHERE user_id = \?/);
+});

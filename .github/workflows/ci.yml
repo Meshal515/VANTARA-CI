@@ -110,6 +110,9 @@ jobs:
       - name: Public backend safety gate
         run: node --test tools/backend-public-safety.test.mjs
 
+      - name: Validate operational scripts
+        run: node --check services/sync-worker/verify.mjs
+
       - name: Clean database bootstrap + backup/restore
         run: sh infra/test-db-bootstrap.sh
 
