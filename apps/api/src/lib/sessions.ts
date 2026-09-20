@@ -1,4 +1,4 @@
-import { query, queryOne } from '@vantara/db';
+import { query, queryOne, transaction } from '@vantara/db';
 import { identityIdForUsername } from '@vantara/domain';
 import type { UchiyomiClient } from '@vantara/uchiyomi';
 import { decrypt, encrypt, newSessionId } from './crypto.ts';
@@ -63,39 +63,51 @@ export class SessionStore {
       expiresInDays,
     });
 
-    await query(
-      `INSERT INTO vantara_users (uchiyomi_user_id, username)
-            VALUES ($1, $2)
-       ON CONFLICT (uchiyomi_user_id)
-       DO UPDATE SET username = EXCLUDED.username, last_seen_at = now()`,
-      [result.user.id, result.user.username],
-    );
     const encrypted = encrypt(minted.token, this.#options.key);
     const identityId = identityIdForUsername(result.user.username);
-    if (identityId) {
-      await query(
-        `INSERT INTO vantara_identity_links
-           (vantara_identity_id, uchiyomi_user_id, token_encrypted, token_id, revoked_at)
-         VALUES ($1, $2, $3, $4, NULL)
-         ON CONFLICT (vantara_identity_id) DO UPDATE SET
-           uchiyomi_user_id = EXCLUDED.uchiyomi_user_id,
-           token_encrypted = EXCLUDED.token_encrypted,
-           token_id = EXCLUDED.token_id,
-           linked_at = now(),
-           last_used_at = now(),
-           revoked_at = NULL`,
-        [identityId, result.user.id, encrypted, minted.id],
-      );
-    }
-
     const id = newSessionId();
-    await query(
-      `INSERT INTO vantara_sessions
-         (id, uchiyomi_user_id, token_encrypted, token_id, device, expires_at)
-       VALUES ($1, $2, $3, $4, $5, now() + ($6 || ' days')::interval)`,
-      [id, result.user.id, encrypted, minted.id, device ?? null, String(expiresInDays)],
-    );
 
+    try {
+      await transaction(async (client) => {
+        await client.query(
+          `INSERT INTO vantara_users (uchiyomi_user_id, username)
+                VALUES ($1, $2)
+           ON CONFLICT (uchiyomi_user_id)
+           DO UPDATE SET username = EXCLUDED.username, last_seen_at = now()`,
+          [result.user.id, result.user.username],
+        );
+
+        if (identityId) {
+          await client.query(
+            `INSERT INTO vantara_identity_links
+               (vantara_identity_id, uchiyomi_user_id, token_encrypted, token_id, revoked_at)
+             VALUES ($1, $2, $3, $4, NULL)
+             ON CONFLICT (vantara_identity_id) DO UPDATE SET
+               uchiyomi_user_id = EXCLUDED.uchiyomi_user_id,
+               token_encrypted = EXCLUDED.token_encrypted,
+               token_id = EXCLUDED.token_id,
+               linked_at = now(),
+               last_used_at = now(),
+               revoked_at = NULL`,
+            [identityId, result.user.id, encrypted, minted.id],
+          );
+        }
+
+        await client.query(
+          `INSERT INTO vantara_sessions
+             (id, uchiyomi_user_id, token_encrypted, token_id, device, expires_at)
+           VALUES ($1, $2, $3, $4, $5, now() + ($6 || ' days')::interval)`,
+          [id, result.user.id, encrypted, minted.id, device ?? null, String(expiresInDays)],
+        );
+      });
+    } catch (dbError) {
+      try {
+        await uchiyomi.revokeToken(minted.token, minted.id);
+      } catch (cleanupError) {
+        throw new AggregateError([dbError, cleanupError], 'login persistence and cleanup both failed');
+      }
+      throw dbError;
+    }
     return {
       id,
       ...(identityId ? { identityId } : {}),
