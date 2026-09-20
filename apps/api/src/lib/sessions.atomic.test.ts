@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { encrypt } from './crypto.ts';
 
 const db = vi.hoisted(() => ({
   query: vi.fn(),
@@ -85,5 +86,63 @@ describe('SessionStore.login atomicity', () => {
       token: 'minted-long-lived-token',
       tokenId: 'minted-token-id',
     });
+  });
+});
+
+
+describe('SessionStore.purgeExpired credential lifecycle', () => {
+  it('revokes unprotected upstream credentials before deleting expired local rows', async () => {
+    const service = upstream();
+    const key = Buffer.alloc(32, 11);
+    db.query
+      .mockResolvedValueOnce([
+        {
+          id: 'old-session',
+          token_encrypted: encrypt('old-upstream-token', key),
+          token_id: 'old-token-id',
+        },
+        {
+          id: 'identity-backed-session',
+          token_encrypted: encrypt('protected-upstream-token', key),
+          token_id: 'protected-token-id',
+        },
+      ])
+      .mockResolvedValueOnce([{ token_id: 'protected-token-id' }])
+      .mockResolvedValueOnce([{ id: 'old-session' }, { id: 'identity-backed-session' }]);
+
+    const store = new SessionStore({
+      key,
+      ttlDays: 60,
+      uchiyomi: service as never,
+    });
+
+    await expect(store.purgeExpired()).resolves.toBe(2);
+    expect(service.revokeToken).toHaveBeenCalledTimes(1);
+    expect(service.revokeToken).toHaveBeenCalledWith('old-upstream-token', 'old-token-id');
+    expect(db.query).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps local rows when upstream revocation fails so cleanup can retry', async () => {
+    const service = upstream();
+    service.revokeToken.mockRejectedValueOnce(new Error('upstream unavailable'));
+    const key = Buffer.alloc(32, 13);
+    db.query
+      .mockResolvedValueOnce([
+        {
+          id: 'old-session',
+          token_encrypted: encrypt('old-upstream-token', key),
+          token_id: 'old-token-id',
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const store = new SessionStore({
+      key,
+      ttlDays: 60,
+      uchiyomi: service as never,
+    });
+
+    await expect(store.purgeExpired()).rejects.toThrow('upstream unavailable');
+    expect(db.query).toHaveBeenCalledTimes(2);
   });
 });
