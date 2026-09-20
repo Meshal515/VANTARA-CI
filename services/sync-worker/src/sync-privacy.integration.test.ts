@@ -225,8 +225,8 @@ describe('sync privacy boundaries', () => {
         .map((row) => `${String(row['event_id'])}:${String(row['user_id'])}`)
         .sort(),
     ).toEqual([
-      `event-from-viewer:${OTHER}`,
       `event-from-viewer:${THIRD}`,
+      `event-from-viewer:${OTHER}`,
       `event-public:${VIEWER}`,
       `event-to-viewer:${VIEWER}`,
     ]);
