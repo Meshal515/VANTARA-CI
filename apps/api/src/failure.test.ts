@@ -88,6 +88,10 @@ beforeAll(async () => {
     if (upstreamDown) return fail();
     return [];
   }) as typeof built.ctx.uchiyomi.chapters;
+  built.ctx.uchiyomi.series = (async () => {
+    if (upstreamDown) return fail();
+    return { id: 's1', name: 'عمل' };
+  }) as typeof built.ctx.uchiyomi.series;
   built.ctx.uchiyomi.book = (async () => {
     if (upstreamDown) return fail();
     return {
@@ -193,6 +197,18 @@ describe('upstream down', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/v1/books/book-1/progress',
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toMatchObject({ error: 'upstream_unavailable' });
+  });
+
+  it('does not turn a chapter-list outage into an empty series', async () => {
+    healthy();
+    upstreamDown = true;
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/series/s1',
       headers: { cookie },
     });
     expect(res.statusCode).toBe(502);
