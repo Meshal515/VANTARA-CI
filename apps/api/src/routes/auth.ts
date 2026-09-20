@@ -97,9 +97,17 @@ export async function authRoutes(app: FastifyInstance, ctx: AppContext): Promise
       // إلغاء كل الأجهزة يملكه Worker لأن trusted_devices في D1.
       return reply.code(409).send({ error: 'device_logout_all_required' });
     }
-    const count = await ctx.sessions.revokeAllFor(session.userId);
-    void reply.clearCookie(SESSION_COOKIE, { path: '/' });
-    return reply.send({ revoked: count });
+    try {
+      const count = await ctx.sessions.revokeAllFor(session.userId);
+      void reply.clearCookie(SESSION_COOKIE, { path: '/' });
+      return reply.send({ revoked: count });
+    } catch (err) {
+      request.log.error({ err }, 'upstream token revoke failed during logout-all');
+      // revokeAllFor يغلق الجلسات المحلية حتى عند فشل credential واحد؛ فلا
+      // نترك Cookie ميتًا يبدو للمتصفح كجلسة ما زالت موجودة.
+      void reply.clearCookie(SESSION_COOKIE, { path: '/' });
+      return reply.code(502).send({ error: 'upstream_unavailable' });
+    }
   });
 
   app.get('/v1/auth/me', { preHandler: requireSession(ctx) }, async (request, reply) => {
