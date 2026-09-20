@@ -304,8 +304,44 @@ export class SessionStore {
     return sessions.length;
   }
 
-  /** تنظيف دوري. الجلسة المنتهية تبقى صفًا ميتًا حتى تُحذف. */
+  /**
+   * تنظيف دوري مع إلغاء credential المنبع قبل فقد آخر مرجع محلي له.
+   *
+   * حذف الصف أولًا كان يترك توكن Uchiyomi طويل العمر صالحًا حتى 60 يومًا
+   * بلا token_id/token_encrypted يمكن الرجوع إليهما. إذا فشل الإلغاء نحتفظ
+   * بالصف ونفشل المهمة كي تعيد المحاولة لاحقًا.
+   */
   async purgeExpired(): Promise<number> {
+    const candidates = await query<{
+      id: string;
+      token_encrypted: string;
+      token_id: string | null;
+    }>(
+      `SELECT id, token_encrypted, token_id
+         FROM vantara_sessions
+        WHERE expires_at < now() - interval '7 days'
+           OR revoked_at < now() - interval '7 days'`,
+    );
+    if (candidates.length === 0) return 0;
+
+    const linked = await query<{ token_id: string }>(
+      `SELECT token_id
+         FROM vantara_identity_links
+        WHERE revoked_at IS NULL
+          AND token_id IS NOT NULL`,
+    );
+    const protectedIds = new Set(linked.map((row) => row.token_id));
+    const revokedIds = new Set<string>();
+
+    for (const session of candidates) {
+      const tokenId = session.token_id;
+      if (!tokenId || protectedIds.has(tokenId) || revokedIds.has(tokenId)) continue;
+
+      const token = decrypt(session.token_encrypted, this.#options.key);
+      await this.#options.uchiyomi.revokeToken(token, tokenId);
+      revokedIds.add(tokenId);
+    }
+
     const rows = await query<{ id: string }>(
       `DELETE FROM vantara_sessions
         WHERE expires_at < now() - interval '7 days'
