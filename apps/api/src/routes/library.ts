@@ -199,7 +199,7 @@ export async function libraryRoutes(app: FastifyInstance, ctx: AppContext): Prom
     try {
       const [series, chapters] = await Promise.all([
         ctx.uchiyomi.series(id, session.token),
-        ctx.uchiyomi.chapters(id, session.token).catch(() => []),
+        ctx.uchiyomi.chapters(id, session.token),
       ]);
       if (!series) return reply.code(404).send({ error: 'not_found' });
       return reply.send({ series, chapters });
@@ -207,7 +207,7 @@ export async function libraryRoutes(app: FastifyInstance, ctx: AppContext): Prom
       if (err instanceof UchiyomiError && err.status === 404) {
         return reply.code(404).send({ error: 'not_found' });
       }
-      throw err;
+      return reply.code(502).send({ error: 'upstream_unavailable' });
     }
   });
 
