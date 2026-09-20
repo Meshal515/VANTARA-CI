@@ -42,7 +42,7 @@ import {
 import type { CollectionRow, WorkDescriptor } from '@vantara/domain';
 
 import type { D1PreparedStatement, Env, ExecutionContext } from './types.ts';
-import { bearerFrom, mintToken, verifyToken } from './session.ts';
+import { bearerFrom, verifyToken } from './session.ts';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
 
@@ -174,31 +174,6 @@ async function handleAccounts(env: Env, now: number): Promise<Response> {
         lastSeenAt: row.beat_at || null,
       };
     }),
-  });
-}
-
-/** اختيار الحساب هو الدخول: لا كلمة مرور، ولا خطوة تحقق. */
-async function handleSession(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json().catch(() => null)) as { userId?: unknown } | null;
-  const userId = typeof body?.userId === 'string' ? body.userId : '';
-  if (!userId) return json({ error: 'bad_request' }, { status: 400 });
-
-  // الحسابات الثلاثة فقط. لا إنشاء حساب من الشبكة.
-  const account = await env.DB.prepare(
-    'SELECT a.user_id, a.username, p.display_name FROM accounts a LEFT JOIN profiles p USING (user_id) WHERE a.user_id = ?',
-  )
-    .bind(userId)
-    .first<{ user_id: string; username: string; display_name: string | null }>();
-  if (!account) return json({ error: 'unknown_account' }, { status: 404 });
-
-  const token = await mintToken(account.user_id, env.VANTARA_SESSION_SECRET);
-  return json({
-    token,
-    user: {
-      userId: account.user_id,
-      username: account.username,
-      displayName: account.display_name ?? account.username,
-    },
   });
 }
 
@@ -1827,11 +1802,6 @@ export default {
         const response = await handleAccounts(env, now);
         return new Response(response.body, { status: response.status, headers: { ...JSON_HEADERS, ...cors } });
       }
-      if (path === '/v1/session' && request.method === 'POST') {
-        const response = await handleSession(request, env);
-        return new Response(response.body, { status: response.status, headers: { ...JSON_HEADERS, ...cors } });
-      }
-
       const token = bearerFrom(request);
       const userId = token ? await verifyToken(token, env.VANTARA_SESSION_SECRET) : null;
       if (!userId) return json({ error: 'unauthorized' }, { status: 401 }, cors);
