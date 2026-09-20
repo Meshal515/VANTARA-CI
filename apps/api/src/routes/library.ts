@@ -497,13 +497,22 @@ export async function libraryRoutes(app: FastifyInstance, ctx: AppContext): Prom
   app.get('/v1/books/:id/progress', { preHandler: requireSession(ctx) }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const session = sessionOf(request);
-    const book = await ctx.uchiyomi.book(id, session.token).catch(() => undefined);
-    if (!book) return reply.code(404).send({ error: 'not_found' });
-    return reply.send({
-      owner: ownerOf('reading.progress'),
-      page: book.readProgress?.page ?? 0,
-      completed: book.readProgress?.completed ?? false,
-    });
+    try {
+      const book = await ctx.uchiyomi.book(id, session.token);
+      if (!book) return reply.code(404).send({ error: 'not_found' });
+      return reply.send({
+        owner: ownerOf('reading.progress'),
+        page: book.readProgress?.page ?? 0,
+        completed: book.readProgress?.completed ?? false,
+      });
+    } catch (err) {
+      if (err instanceof UchiyomiError && err.status === 404) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      // 404 يسمح للعميل بإسقاط صف outbox نهائيًا؛ لا يجوز تحويل outage
+      // مؤقت إلى «الفصل غير موجود» وإقرار مرآة لم يرها المالك.
+      return reply.code(502).send({ error: 'upstream_unavailable' });
+    }
   });
 
   /** التقدم يُكتب عند Uchiyomi وحده (D-02) — هذا تمريرة لا كتابة. */
